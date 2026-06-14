@@ -1,0 +1,67 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+      notes:
+        description: 'Release notes'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build m5-cardputer-adv
+        run: pio run -e m5-cardputer-adv
+
+      - name: Build m5-cardputer
+        run: pio run -e m5-cardputer
+
+      - name: Rename binaries
+        run: |
+          cp .pio/build/m5-cardputer-adv/firmware.factory.bin \
+             csi-sense-${{ github.event.inputs.tag }}-m5-cardputer-adv.bin
+          cp .pio/build/m5-cardputer/firmware.factory.bin \
+             csi-sense-${{ github.event.inputs.tag }}-m5-cardputer.bin
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
+          body: |
+            ${{ github.event.inputs.notes }}
+
+            ## Flash
+
+            ```sh
+            # Cardputer ADV
+            esptool.py write_flash 0x0 csi-sense-${{ github.event.inputs.tag }}-m5-cardputer-adv.bin
+
+            # Cardputer v1/v1.1
+            esptool.py write_flash 0x0 csi-sense-${{ github.event.inputs.tag }}-m5-cardputer.bin
+            ```
+
+            Built from commit ${{ github.sha }}.
+          files: |
+            csi-sense-${{ github.event.inputs.tag }}-m5-cardputer-adv.bin
+            csi-sense-${{ github.event.inputs.tag }}-m5-cardputer.bin
