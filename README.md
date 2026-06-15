@@ -4,6 +4,8 @@
 
 Firmware for the M5Stack Cardputer that reads raw WiFi Channel State Information (CSI) from the ESP32-S3 radio and visualises it in real time. Built for studying what CSI actually is. For demo and educational purposes.
 
+<p align="center"><sub><i>Knowledge should be free 🏴‍☠️</i></sub></p>
+
 ## what it is
 
 When your ESP32 receives a WiFi frame, the hardware records how each OFDM subcarrier was attenuated and phase-shifted by the environment - that is the channel state. When something moves through the room, multipath reflections change, and those measurements change too.
