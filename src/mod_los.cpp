@@ -40,11 +40,11 @@ extern "C" {
 }
 
 /* ── Tuning ──────────────────────────────────────────────────────────────── */
-#define LOS_COUNTDOWN_S    5
-#define LOS_EMA_ALPHA      0.25f
-#define LOS_DIFF_SIGMA_EPS 0.5f
-#define LOS_SCORE_MAX_STD  3.0f
-#define LOS_SILENT_BELOW   20.0f
+#define LOS_COUNTDOWN_S      5
+#define LOS_EMA_TAU_S        0.35f  /* EMA time constant (seconds) — fps-independent */
+#define LOS_DIFF_SIGMA_EPS   0.5f
+#define LOS_SCORE_MAX_STD    3.0f
+#define LOS_SILENT_BELOW     20.0f
 
 /* ── State ───────────────────────────────────────────────────────────────── */
 static los_state_t s_state = LOS_IDLE;
@@ -63,6 +63,7 @@ static float s_diff_sigma[CSI_N_SUB];
 
 static float    s_score     = 0.0f;
 static uint32_t s_beep_next = 0;
+static uint32_t s_scan_last_ts = 0;
 
 /* ── Async audio queue ───────────────────────────────────────────────────── */
 typedef struct { float hz; int dur_ms; int gap_ms; } beep_req_t;
@@ -109,12 +110,23 @@ static inline float clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/* Geiger-counter style: beep RATE scales with score, tone pitch rises gently.
+ * score 20→100 maps to ~1 Hz → ~22 Hz.  Beep duration stays constant (35 ms)
+ * so gaps between clicks shrink as motion increases.
+ *
+ * Band   score    rate       period   tone
+ *   1    20-35    2  Hz      500 ms   800 Hz
+ *   2    35-50    5  Hz      200 ms   950 Hz
+ *   3    50-65   11  Hz       90 ms  1200 Hz
+ *   4    65-80   22  Hz       45 ms  1500 Hz
+ *   5    >80     22  Hz       45 ms  2000 Hz */
 static void score_to_beep(float score, float *hz, int *dur_ms, int *period_ms) {
     if (score < LOS_SILENT_BELOW) { *hz = 0; *dur_ms = 0; *period_ms = 9999; return; }
-    if (score < 40.0f)  { *hz = 600;  *dur_ms = 60;  *period_ms = 1800; return; }
-    if (score < 65.0f)  { *hz = 1200; *dur_ms = 80;  *period_ms = 600;  return; }
-    if (score < 85.0f)  { *hz = 2200; *dur_ms = 100; *period_ms = 200;  return; }
-                          *hz = 3200; *dur_ms = 120; *period_ms = 80;
+    if (score < 35.0f)  { *hz =  800; *dur_ms = 35; *period_ms =  500; return; }
+    if (score < 50.0f)  { *hz =  950; *dur_ms = 35; *period_ms =  200; return; }
+    if (score < 65.0f)  { *hz = 1200; *dur_ms = 35; *period_ms =   90; return; }
+    if (score < 80.0f)  { *hz = 1500; *dur_ms = 35; *period_ms =   45; return; }
+                          *hz = 2000; *dur_ms = 35; *period_ms =   45;
 }
 
 static void reset_cal(void) {
@@ -201,6 +213,7 @@ void los_update(const csi_frame_t *f, uint32_t now_ms) {
     }
 
     case LOS_CALIBRATING: {
+        int cal_target = g_app.los_active_mode ? CSI_CAL_FRAMES_ACTIVE : CSI_CAL_FRAMES;
         if (s_prev_valid) {
             for (int i = 0; i < CSI_N_SUB; i++) {
                 float d = fabsf((float)f->amp[i] - s_prev[i]);
@@ -208,10 +221,10 @@ void los_update(const csi_frame_t *f, uint32_t now_ms) {
                 s_cal_dsum2[i] += d * d;
             }
             s_cal_n++;
-            g_app.los_cal_progress = s_cal_n * 100 / CSI_CAL_FRAMES;
+            g_app.los_cal_progress = s_cal_n * 100 / cal_target;
 
-            if (s_cal_n >= CSI_CAL_FRAMES) {
-                float N = (float)CSI_CAL_FRAMES;
+            if (s_cal_n >= cal_target) {
+                float N = (float)cal_target;
                 for (int i = 0; i < CSI_N_SUB; i++) {
                     s_diff_mean[i] = s_cal_dsum[i] / N;
                     float var = s_cal_dsum2[i] / N - s_diff_mean[i] * s_diff_mean[i];
@@ -224,6 +237,7 @@ void los_update(const csi_frame_t *f, uint32_t now_ms) {
                 beep_async(600,  80, 80);
                 beep_async(900,  80, 80);
                 beep_async(1400, 100,  0);
+                s_scan_last_ts = 0;   /* force full alpha on first scan frame */
                 s_state = LOS_SCANNING;
                 g_app.los_state = LOS_SCANNING;
                 s_beep_next = now_ms + 600;
@@ -245,7 +259,18 @@ void los_update(const csi_frame_t *f, uint32_t now_ms) {
             }
         }
         float score_raw = (raw / (LOS_SCORE_MAX_STD * (float)CSI_N_SUB)) * 100.0f;
-        s_score = LOS_EMA_ALPHA * score_raw + (1.0f - LOS_EMA_ALPHA) * s_score;
+
+        /* Time-based EMA: alpha derived from elapsed time so the smoothing
+         * time constant (LOS_EMA_TAU_S) is stable regardless of CSI fps.
+         * At 2 fps (500 ms/frame): alpha ≈ 0.76   (slow, few frames)
+         * At 100 fps (10 ms/frame): alpha ≈ 0.028  (fine-grained, smooth) */
+        float dt_s = (s_scan_last_ts > 0)
+                     ? (float)(now_ms - s_scan_last_ts) * 0.001f
+                     : 0.1f;
+        if (dt_s > 1.0f) dt_s = 1.0f;  /* clamp after long pauses */
+        float alpha = 1.0f - expf(-dt_s / LOS_EMA_TAU_S);
+        s_scan_last_ts = now_ms;
+        s_score = alpha * score_raw + (1.0f - alpha) * s_score;
         s_score = clampf(s_score, 0.0f, 100.0f);
         g_app.motion_score = s_score;
 

@@ -17,7 +17,9 @@ This firmware captures those measurements, draws them live on screen, and runs a
 - Not a finished product. Calibration drifts. Environment changes break it.
 - Not magic. Every effect you see has a boring RF explanation.
 
-The frame rate depends entirely on ambient WiFi traffic: 1–2 fps passively in a quiet room, up to ~50 fps if a device on the same channel is actively transferring data.
+**Passive mode** frame rate depends on ambient WiFi traffic: 1–2 fps in a quiet room, up to ~50 fps near an active device.
+
+**Active injection mode** sends 802.11 Probe Request frames at ~100 Hz with per-frame SA MAC rotation, causing the target AP to reply with Probe Responses. This bypasses the AP's per-source-address rate limit and raises CSI collection to 70–300 fps depending on AP behaviour. Frame injection uses a libnet80211 symbol-weakening patch (wsl_bypasser technique) applied at build time via `scripts/patch_libnet80211.py`.
 
 ## hardware
 
@@ -38,11 +40,27 @@ The frame rate depends entirely on ambient WiFi traffic: 1–2 fps passively in 
 
 Navigation: arrow keys or WASD. ESC / backspace = back to menu.
 
+In LOS mode: **F** = scan APs, **P** = toggle active/passive injection, **R** = recalibrate, **C** = cycle channel, **Q** = quit.
+
 ## LOS detector
 
-Press **F** to scan for APs -> select one -> stand still for 5 s calibration -> three ascending beeps = armed.
+Press **F** to scan for APs → select one → stand still during calibration → three ascending beeps = armed.
 
-The detector measures how much current frame-to-frame channel differences exceed the calibrated baseline (z-score on differential amplitude). Score 0–100. Audio alert rate scales with score. The threshold is 20/100 - below that, silence.
+The detector measures how much frame-to-frame channel differences exceed the calibrated baseline (z-score on differential amplitude). Score 0–100.
+
+**Calibration** collects a baseline in passive mode (80 frames, ~40–80 s) or active injection mode (500 frames, ~10 s at 50+ fps).
+
+**Active injection** is on by default. Press **P** in LOS mode to toggle between active (fast calibration, higher fps) and passive (AP traffic only).
+
+**Audio alerts** use a Geiger-counter style: beep rate scales continuously with score. Below 20 = silence.
+
+| Score | Beep rate | Tone |
+|-------|-----------|------|
+| 20–35 | 2 Hz | 800 Hz |
+| 35–50 | 5 Hz | 950 Hz |
+| 50–65 | 11 Hz | 1200 Hz |
+| 65–80 | 22 Hz | 1500 Hz |
+| >80 | 22 Hz | 2000 Hz |
 
 ## why the DC null gap in the spectrum
 
@@ -53,8 +71,26 @@ OFDM WiFi reserves subcarrier 32 as a DC null. Subcarriers 0–3 and 61–63 are
 Dependencies are vendored in `lib/`. No internet required at build time.
 
 ```sh
-pio run -e m5-cardputer-adv        # build
-pio run -e m5-cardputer-adv -t upload  # build + flash
+pio run -e m5-cardputer-adv              # build
+pio run -e m5-cardputer-adv -t upload   # build + flash
+```
+
+The pre-build script `scripts/patch_libnet80211.py` weakens the `ieee80211_raw_frame_sanity_check` symbol in the ESP32 WiFi library so that `esp_wifi_80211_tx()` accepts all management frame subtypes. The patch is idempotent (sentinel file) and survives incremental builds.
+
+## serial commands
+
+```
+csi start [ch]          start CSI on channel (default 6)
+csi stop                stop
+csi scan                scan for nearby APs
+csi ap <idx>            lock onto scanned AP (sets BSSID filter)
+csi ch <N>              change channel
+csi active start        start active probe injection
+csi active stop         stop injection
+csi info                frame count, fps, per-subcarrier stats
+los start               begin LOS sequence (countdown → calibrate → scan)
+los stop                stop
+los recal               recalibrate baseline
 ```
 
 ## release

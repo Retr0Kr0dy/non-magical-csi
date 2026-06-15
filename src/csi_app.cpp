@@ -168,6 +168,7 @@ static void neu_kbd_poll(void) {
                           || ev.ascii == 'c' || ev.ascii == 'C'
                           || ev.ascii == 'r' || ev.ascii == 'R'
                           || ev.ascii == 'q' || ev.ascii == 'Q'
+                          || ev.ascii == 'p' || ev.ascii == 'P'
                           || ev.ascii == '\r')) {
                     app_handle_char(ev.ascii);
                     break;
@@ -195,6 +196,7 @@ static void process_nav(void) {
     if (g_app.mode == APP_MODE_LOS) {
         /* ESC / DEL / backspace → stop and return to menu */
         if (nav == NAV_BACK) {
+            csi_active_stop();
             los_stop();
             g_app.mode = APP_MODE_MENU;
             return;
@@ -212,6 +214,7 @@ static void process_nav(void) {
             }
             if (nav == NAV_OK && n > 0) {
                 csi_select_ap(g_app.los_ap_sel);
+                if (g_app.los_active_mode) csi_active_start();
                 los_start();
                 return;
             }
@@ -307,7 +310,17 @@ static void app_handle_char(char c) {
             if (g_app.los_state == LOS_IDLE) los_start();
             if (g_app.los_state == LOS_SELECTING && csi_ap_count() > 0) {
                 csi_select_ap(g_app.los_ap_sel);
+                if (g_app.los_active_mode) csi_active_start();
                 los_start();
+            }
+        }
+        /* P = toggle active / passive injection mode */
+        if (c == 'p' || c == 'P') {
+            g_app.los_active_mode = !g_app.los_active_mode;
+            /* apply immediately if already sensing */
+            if (g_app.los_state == LOS_SCANNING || g_app.los_state == LOS_CALIBRATING) {
+                if (g_app.los_active_mode) csi_active_start();
+                else                        csi_active_stop();
             }
         }
         /* R = recalibrate */
@@ -329,7 +342,7 @@ static void app_handle_char(char c) {
             csi_set_channel(kCh[s_ch_idx]);
         }
         /* Q = quit LOS */
-        if (c == 'q' || c == 'Q') { los_stop(); g_app.mode = APP_MODE_MENU; }
+        if (c == 'q' || c == 'Q') { csi_active_stop(); los_stop(); g_app.mode = APP_MODE_MENU; }
     }
 
     if (c == '+' || c == '=') csi_set_channel(g_app.wifi_channel < 13 ? g_app.wifi_channel + 1 : 1);
@@ -369,7 +382,7 @@ static int cmd_hw(struct konsole *ks, int argc, char **argv) {
 
 static int cmd_csi(struct konsole *ks, int argc, char **argv) {
     if (argc < 2) {
-        kon_printf(ks, "usage: csi start [ch] | stop | info | scan | ch N | ap N\r\n");
+        kon_printf(ks, "usage: csi start [ch] | stop | info | scan | ch N | ap N | active start|stop\r\n");
         return 0;
     }
     if (!strcmp(argv[1], "start")) {
@@ -390,6 +403,10 @@ static int cmd_csi(struct konsole *ks, int argc, char **argv) {
         kon_printf(ks, "frames: %lu  fps: %lu  ch: %d\r\n",
                    (unsigned long)st.frame_count, (unsigned long)st.fps,
                    g_app.wifi_channel);
+        kon_printf(ks, "active: %s  tx_ok: %lu  tx_err: %lu\r\n",
+                   csi_active_running() ? "YES" : "NO",
+                   (unsigned long)csi_active_tx_ok(),
+                   (unsigned long)csi_active_tx_err());
         kon_printf(ks, "sub   mean  var\r\n");
         for (int i = 0; i < CSI_N_SUB; i += 4)
             kon_printf(ks, "[%2d] %.1f %.2f | [%2d] %.1f %.2f | [%2d] %.1f %.2f | [%2d] %.1f %.2f\r\n",
@@ -425,6 +442,10 @@ static int cmd_csi(struct konsole *ks, int argc, char **argv) {
         kon_printf(ks, "monitoring AP: %s  ch%d\r\n",
                    csi_ap_ssid(idx), csi_ap_channel(idx));
         return 0;
+    }
+    if (!strcmp(argv[1], "active") && argc >= 3) {
+        if (!strcmp(argv[2], "start")) { csi_active_start(); kon_printf(ks, "active injection started\r\n"); return 0; }
+        if (!strcmp(argv[2], "stop"))  { csi_active_stop();  kon_printf(ks, "active injection stopped\r\n"); return 0; }
     }
     kon_printf(ks, "unknown csi subcommand\r\n");
     return -1;
@@ -541,8 +562,9 @@ void csi_app_init(void) {
 
     /* App state — must be zeroed before csi_init writes into it */
     memset(&g_app, 0, sizeof g_app);
-    g_app.mode = APP_MODE_MENU;
-    g_app.wifi_channel = 6;
+    g_app.mode             = APP_MODE_MENU;
+    g_app.wifi_channel     = 6;
+    g_app.los_active_mode  = true;
 
     los_init();
 

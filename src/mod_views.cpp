@@ -187,15 +187,21 @@ void ui_statusbar(const char *mode_tag) {
     char tag[9]; snprintf(tag, sizeof tag, "%.8s", mode_tag);
     text1(2, 2, tag, C_ACCENT);
 
-    /* Right cluster: fps + channel */
-    char right[16];
-    if (g_app.csi_running)
-        snprintf(right, sizeof right, "ch%d %ufps",
-                 g_app.wifi_channel, (unsigned)g_app.csi_fps);
-    else
-        snprintf(right, sizeof right, "off");
-    int rw = (int)strlen(right) * 6;
-    text1(SGFX_W - rw - 2, 2, right, C_LABEL);
+    /* Right cluster: channel + fps (fps in green when active injection is on) */
+    int rw = 0;
+    if (g_app.csi_running) {
+        char ch_part[10], fps_part[10];
+        snprintf(ch_part,  sizeof ch_part,  "ch%d ", g_app.wifi_channel);
+        snprintf(fps_part, sizeof fps_part, "%ufps", (unsigned)g_app.csi_fps);
+        rw = (int)(strlen(ch_part) + strlen(fps_part)) * 6;
+        int rx = SGFX_W - rw - 2;
+        text1(rx, 2, ch_part, C_LABEL);
+        text1(rx + (int)strlen(ch_part) * 6, 2, fps_part,
+              csi_active_running() ? C_GREEN : C_LABEL);
+    } else {
+        rw = 18;
+        text1(SGFX_W - rw - 2, 2, "off", C_LABEL);
+    }
 
     /* SSID — centre, clipped so it doesn't collide with right cluster */
     if (g_app.ap_ssid[0]) {
@@ -272,7 +278,15 @@ void ui_draw_los(void) {
         text1(6, UI_BAR_H + 43, "F    find / scan APs", C_LABEL);
         text1(6, UI_BAR_H + 54, "C    cycle channel (1/6/11/13)", C_LABEL);
         text1(6, UI_BAR_H + 65, "R    recalibrate", C_LABEL);
-        ui_footbar("ENT:start  F:scan  C:ch  ESC:menu");
+        /* Mode selector */
+        text1(6, UI_BAR_H + 77, "P    mode:", C_LABEL);
+        bool am = g_app.los_active_mode;
+        text1(66, UI_BAR_H + 77, "ACTIVE",
+              am  ? C_GREEN : (sgfx_rgba8_t){35,55,75,255});
+        text1(66 + 42, UI_BAR_H + 77, "/", C_DIM);
+        text1(66 + 50, UI_BAR_H + 77, "PASSIVE",
+              !am ? C_TEXT  : (sgfx_rgba8_t){35,55,75,255});
+        ui_footbar("ENT:start  F:scan  P:mode  ESC:menu");
         return;
     }
 
@@ -352,7 +366,10 @@ void ui_draw_los(void) {
 
         char pct[8]; snprintf(pct, sizeof pct, "%d%%", prog);
         text1(bx, by + bh + 4, pct, C_TEXT);
-        ui_footbar("ESC:cancel");
+        text1(bx + 28, by + bh + 4,
+              csi_active_running() ? "active injection" : "passive",
+              csi_active_running() ? C_GREEN : C_LABEL);
+        ui_footbar("P:mode  ESC:cancel");
         return;
     }
 
@@ -394,9 +411,12 @@ void ui_draw_los(void) {
             fill(x, sy2 + 15 - sh, 3, sh, C_DIM);
         }
         text1(2, sy2 + 2, "baseline", C_LABEL);
+        text1(SGFX_W - 46, sy2 + 2,
+              csi_active_running() ? "ACTIVE" : "PASSIVE",
+              csi_active_running() ? C_GREEN  : C_LABEL);
     }
 
-    ui_footbar("R:recal  ESC:stop  M:menu");
+    ui_footbar("R:recal  P:mode  ESC:stop");
 }
 
 /* ── SPECTRUM waterfall ──────────────────────────────────────────────────── */

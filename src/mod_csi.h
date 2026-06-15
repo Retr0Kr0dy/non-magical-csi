@@ -35,6 +35,17 @@ int8_t      csi_ap_rssi(int i);
 int         csi_ap_channel(int i);
 const uint8_t* csi_ap_bssid(int i);
 
+/* Active injection mode (probe-request → probe-response → CSI).
+ * csi_select_ap() locks the target but does NOT start injection.
+ * Call csi_active_start() explicitly after csi_select_ap() when active mode
+ * is desired.  csi_active_stop() is called automatically by csi_select_any()
+ * and csi_deinit(). */
+bool     csi_active_running(void);
+uint32_t csi_active_tx_ok(void);
+uint32_t csi_active_tx_err(void);
+void csi_active_start(void);   /* begin probe injection to current s_target   */
+void csi_active_stop(void);    /* stop injection; safe to call when not running */
+
 #ifdef __cplusplus
 }
 #endif

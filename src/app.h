@@ -24,7 +24,8 @@
 #define CSI_RING_SIZE   (1 << CSI_RING_POW)
 #define CSI_RING_MASK   (CSI_RING_SIZE - 1)
 #define CSI_HIST_LEN    90              /* waterfall / motion history rows    */
-#define CSI_CAL_FRAMES  80             /* frames collected during calibration */
+#define CSI_CAL_FRAMES         80      /* passive: ~40-80 s at 1-2 fps       */
+#define CSI_CAL_FRAMES_ACTIVE  500     /* active:  ~10 s at 50 fps           */
 
 typedef struct {
     uint32_t ts_ms;
@@ -72,6 +73,7 @@ typedef struct {
     int         los_cal_progress;      /* 0..100 calibration progress        */
     int         los_ap_sel;            /* AP cursor index during SELECTING   */
     bool        los_is_scanning;      /* scan in flight — show animation    */
+    bool        los_active_mode;      /* true = inject probes; false = passive sniff */
 } app_state_t;
 
 extern app_state_t g_app;

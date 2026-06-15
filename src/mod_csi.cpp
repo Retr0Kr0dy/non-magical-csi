@@ -29,6 +29,9 @@
 
 #include <Arduino.h>
 #include <esp_wifi.h>
+#include <esp_event.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <string.h>
 #include <math.h>
 #include "mod_csi.h"
@@ -67,6 +70,116 @@ static int  s_ap_n = 0;
 /* ── BSSID filter ────────────────────────────────────────────────────────── */
 static uint8_t s_target[6];
 static bool    s_filter = false;
+
+/* ── Active injection ────────────────────────────────────────────────────
+ *
+ * Probe Request frames are injected at ~100 Hz; each AP reply (Probe Response)
+ * is a received 802.11 frame that triggers the CSI callback.  No association
+ * or password required.
+ *
+ * Note: Auth Request frames (FC=0xB0) were tested but cause the ESP32 WiFi
+ * driver's internal 802.11 state machine to process Auth Responses, which
+ * disrupts promiscuous mode and kills all CSI RX.  Probe-only is used.
+ *
+ * SA MAC rotation: APs rate-limit responses per source MAC.  Rotating the
+ * last 3 SA bytes per frame makes each injection appear to come from a
+ * distinct locally-administered unicast client, bypassing per-SA throttling.
+ * Bit 1 of SA[0] is forced high (locally administered); bit 0 stays low
+ * (unicast).  Bytes [0-2] are the device's OUI; bytes [3-5] count up.
+ *
+ * Probe Request frame (36 bytes, FCS appended by driver):
+ *   [0-1]   FC = 0x40 0x00  (Management, Probe Request)
+ *   [2-3]   Duration = 0
+ *   [4-9]   DA = broadcast  (only target BSSID responds)
+ *   [10-15] SA = rotated per-frame
+ *   [16-21] BSSID = target
+ *   [22-23] Seq ctrl (driver fills via en_sys_seq=true)
+ *   [24-25] SSID IE tag=0 len=0 (wildcard)
+ *   [26-35] Supported Rates IE (8 rates)
+ * ─────────────────────────────────────────────────────────────────────────*/
+#define CSI_ACTIVE_INTERVAL_MS  10   /* ~100 Hz TX */
+
+static TaskHandle_t      s_active_task   = nullptr;
+static volatile bool     s_active_run    = false;
+static uint8_t           s_probe_frame[36];
+static uint8_t           s_sa_base[6];
+static volatile uint32_t s_active_tx_ok  = 0;
+static volatile uint32_t s_active_tx_err = 0;
+
+/* Write rotating SA into whichever frame is about to be sent.
+ * SA is at bytes [10-15] in every 802.11 management frame.                 */
+static inline void inject_apply_sa(uint8_t *frame, uint32_t n) {
+    frame[10] = s_sa_base[0] | 0x02;
+    frame[11] = s_sa_base[1];
+    frame[12] = s_sa_base[2];
+    frame[13] = (uint8_t)(n      );
+    frame[14] = (uint8_t)(n >>  8);
+    frame[15] = (uint8_t)(n >> 16);
+}
+
+static void active_probe_task(void *) {
+    uint32_t log_t   = millis();
+    uint32_t log_rx0 = s_frame_total;   /* CSI frame count at last log tick */
+    while (s_active_run) {
+        uint32_t n = s_active_tx_ok;
+        inject_apply_sa(s_probe_frame, n);
+
+        esp_err_t r = esp_wifi_80211_tx(WIFI_IF_AP, s_probe_frame, (int)sizeof s_probe_frame, true);
+        if (r == ESP_OK) s_active_tx_ok  = s_active_tx_ok  + 1;
+        else             s_active_tx_err = s_active_tx_err + 1;
+
+        uint32_t now = millis();
+        if ((now - log_t) >= 5000) {
+            uint32_t rx_now  = s_frame_total;
+            uint32_t rx_rate = (rx_now - log_rx0) * 1000 / (now - log_t);
+            log_rx0 = rx_now;
+            log_t   = now;
+            Serial.printf("[CSI] inject tx_ok=%lu tx_err=%lu csi_fps=%lu\n",
+                          (unsigned long)s_active_tx_ok,
+                          (unsigned long)s_active_tx_err,
+                          (unsigned long)rx_rate);
+        }
+        vTaskDelay(pdMS_TO_TICKS(CSI_ACTIVE_INTERVAL_MS));
+    }
+    s_active_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static void active_start(const uint8_t *bssid) {
+    if (s_active_task) return;
+
+    uint8_t mac[6] = {};
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    memcpy(s_sa_base, mac, 6);
+
+    /* Probe Request frame */
+    static const uint8_t kRates[] = {0x82,0x84,0x8b,0x96, 0x24,0x30,0x48,0x6c};
+    memset(s_probe_frame, 0, sizeof s_probe_frame);
+    s_probe_frame[0] = 0x40;                       /* FC: Management, Probe Request */
+    memset(s_probe_frame + 4, 0xff, 6);            /* DA: broadcast */
+    /* SA [10-15]: set per-frame by inject_apply_sa() */
+    memcpy(s_probe_frame + 16, bssid, 6);          /* BSSID: target */
+    s_probe_frame[26] = 0x01; s_probe_frame[27] = 0x08; /* Supported Rates IE */
+    memcpy(s_probe_frame + 28, kRates, 8);
+
+    s_active_tx_ok = 0; s_active_tx_err = 0;
+    s_active_run = true;
+    BaseType_t ok = xTaskCreatePinnedToCore(active_probe_task, "csi_active", 2048,
+                                            nullptr, 2, &s_active_task, 0);
+    Serial.printf("[CSI] active_start bssid=%02x:%02x:%02x:%02x:%02x:%02x task=%s\n",
+                  bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5],
+                  ok == pdPASS ? "OK" : "FAIL");
+}
+
+static void active_stop(void) {
+    if (!s_active_run) return;
+    s_active_run = false;
+    /* task sees flag within INTERVAL_MS, self-deletes, and clears s_active_task */
+    uint32_t t0 = millis();
+    while (s_active_task && (millis() - t0) < 100)
+        vTaskDelay(pdMS_TO_TICKS(5));
+    s_active_task = nullptr;   /* safety clear */
+}
 
 /* Alpha-max beta-min: |sqrt(I²+Q²)| ≈ α·max + β·min, error < 4%.
  * α=1, β=0.5 — single shift, no float.                                      */
@@ -117,16 +230,34 @@ static void csi_cb(void* ctx, wifi_csi_info_t* d) {
 }
 
 static void wifi_sta_start(int channel) {
-    /* Clean slate — ignore errors if not yet initialized */
     esp_wifi_stop();
     esp_wifi_deinit();
+
+    /* Default event loop — suppresses "failed to post WiFi event" log spam */
+    esp_event_loop_create_default();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    esp_wifi_set_mode(WIFI_MODE_STA);
+
+    /* APSTA: STA stays in promiscuous for CSI; AP interface used for probe injection.
+     * In APSTA the driver forces AP to follow the STA channel, so csi_set_channel()
+     * keeps both interfaces on the target AP's channel automatically.             */
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+
+    /* Minimal hidden soft-AP — required for WIFI_IF_AP TX; not used for connections */
+    wifi_config_t ap_cfg = {};
+    memcpy(ap_cfg.ap.ssid, "csi", 3);
+    ap_cfg.ap.ssid_len        = 3;
+    ap_cfg.ap.channel         = (uint8_t)channel;
+    ap_cfg.ap.authmode        = WIFI_AUTH_OPEN;
+    ap_cfg.ap.ssid_hidden     = 1;
+    ap_cfg.ap.max_connection  = 0;
+    ap_cfg.ap.beacon_interval = 60000;  /* max — one beacon per minute, minimal noise */
+    esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+
     esp_wifi_start();
-    esp_wifi_set_ps(WIFI_PS_NONE);   /* keep radio always-on for max CSI rate */
+    esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_set_channel((uint8_t)channel, WIFI_SECOND_CHAN_NONE);
 }
 
@@ -162,6 +293,7 @@ int csi_init(int channel) {
 }
 
 void csi_deinit(void) {
+    active_stop();
     esp_wifi_set_csi(false);
     esp_wifi_set_promiscuous(false);
     g_app.csi_running = false;
@@ -174,14 +306,17 @@ void csi_set_channel(int ch) {
 
 void csi_select_ap(int idx) {
     if (idx < 0 || idx >= s_ap_n) return;
+    active_stop();
     memcpy(s_target, s_aps[idx].bssid, 6);
     s_filter = true;
     strncpy(g_app.ap_ssid, s_aps[idx].ssid, 32);
     memcpy(g_app.ap_bssid, s_aps[idx].bssid, 6);
     csi_set_channel(s_aps[idx].ch);
+    /* caller decides whether to start active injection via csi_active_start() */
 }
 
 void csi_select_any(int channel) {
+    active_stop();
     s_filter = false;
     memset(s_target, 0, 6);
     g_app.ap_ssid[0] = 0;
@@ -256,3 +391,12 @@ const char*    csi_ap_ssid(int i)       { return i < s_ap_n ? s_aps[i].ssid : ""
 int8_t         csi_ap_rssi(int i)       { return i < s_ap_n ? s_aps[i].rssi : 0; }
 int            csi_ap_channel(int i)    { return i < s_ap_n ? s_aps[i].ch   : 0; }
 const uint8_t* csi_ap_bssid(int i)     { return i < s_ap_n ? s_aps[i].bssid : nullptr; }
+bool           csi_active_running(void) { return s_active_run; }
+uint32_t       csi_active_tx_ok(void)  { return s_active_tx_ok; }
+uint32_t       csi_active_tx_err(void) { return s_active_tx_err; }
+
+void csi_active_start(void) {
+    if (!s_filter) { Serial.printf("[CSI] active_start skipped: no target\n"); return; }
+    active_start(s_target);
+}
+void csi_active_stop(void)  { active_stop(); }
