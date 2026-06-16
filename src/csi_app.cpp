@@ -50,6 +50,8 @@ extern "C" {
 #include "app.h"
 #include "mod_csi.h"
 #include "mod_los.h"
+#include "mod_training.h"
+#include "mod_chanoccup.h"
 #include "mod_views.h"
 
 /* ── Global app state ───────────────────────────────────────────────────── */
@@ -132,48 +134,85 @@ static int kbd_pop(void) {
 typedef enum { NAV_NONE, NAV_UP, NAV_DOWN, NAV_LEFT, NAV_RIGHT, NAV_OK, NAV_BACK } nav_t;
 static nav_t s_nav_pending = NAV_NONE;
 
+/* True when the keyboard should act as a text field: WASD are literal chars,
+ * backspace deletes, only ESC and arrow keys carry nav meaning. */
+static bool is_text_input_mode(void) {
+    if (g_app.mode == APP_MODE_CONSOLE) return true;
+    if (g_app.mode == APP_MODE_TRAINING && training_ui() == TRAIN_UI_NAME) return true;
+    return false;
+}
+
 static void neu_kbd_poll(void) {
     sic_key_event_t ev;
     for (int i = 0; i < 8; i++) {
         if (sic_key_poll(&ev) <= 0) break;
         if (!ev.pressed) continue;
+        bool text = is_text_input_mode();
         switch (ev.code) {
-        /* Navigation events routed to app, NOT to konsole */
+        /* Dedicated arrow keys always generate nav events */
         case SIC_KEY_UP:    s_nav_pending = NAV_UP;    break;
         case SIC_KEY_DOWN:  s_nav_pending = NAV_DOWN;  break;
         case SIC_KEY_LEFT:  s_nav_pending = NAV_LEFT;  break;
         case SIC_KEY_RIGHT: s_nav_pending = NAV_RIGHT; break;
-        case SIC_KEY_ENTER: s_nav_pending = NAV_OK;
-                            kbd_push(0x0D); break;   /* also let konsole handle Enter */
-        case SIC_KEY_ESC:       s_nav_pending = NAV_BACK; kbd_push(0x1B); break;
-        case SIC_KEY_BACKSPACE: s_nav_pending = NAV_BACK; kbd_push(0x08); break;
+        /* Enter: nav event + feed char only to konsole */
+        case SIC_KEY_ENTER:
+            s_nav_pending = NAV_OK;
+            if (g_app.mode == APP_MODE_CONSOLE) kbd_push(0x0D);
+            break;
+        /* ESC: always nav back + feed char only to konsole */
+        case SIC_KEY_ESC:
+            s_nav_pending = NAV_BACK;
+            if (g_app.mode == APP_MODE_CONSOLE) kbd_push(0x1B);
+            break;
+        /* Backspace: in text mode = delete char; in nav mode = back */
+        case SIC_KEY_BACKSPACE:
+            if (text) {
+                if (g_app.mode == APP_MODE_CONSOLE) kbd_push(0x08);
+                else                                app_handle_char(0x08);
+            } else {
+                s_nav_pending = NAV_BACK;
+            }
+            break;
         default:
             if (ev.ascii) {
-                /* WASD = arrows, DEL = back — unconditional */
-                if      (ev.ascii == 'w' || ev.ascii == 'W') { s_nav_pending = NAV_UP;    break; }
-                else if (ev.ascii == 's' || ev.ascii == 'S') { s_nav_pending = NAV_DOWN;  break; }
-                else if (ev.ascii == 'a' || ev.ascii == 'A') { s_nav_pending = NAV_LEFT;  break; }
-                else if (ev.ascii == 'd' || ev.ascii == 'D') { s_nav_pending = NAV_RIGHT; break; }
-                else if (ev.ascii == 0x7F)                   { s_nav_pending = NAV_BACK;  break; }
-                /* Menu: number keys jump immediately without needing Enter */
-                else if (g_app.mode == APP_MODE_MENU
-                         && ev.ascii >= '1' && ev.ascii <= '6') {
-                    s_menu_sel    = ev.ascii - '0';
-                    s_nav_pending = NAV_OK;
-                    break;
+                if (text) {
+                    /* Text input: WASD and DEL are literal, not nav */
+                    uint8_t ch = (ev.ascii == 0x7F) ? 0x08 : ev.ascii; /* remap DEL→BS */
+                    if (g_app.mode == APP_MODE_CONSOLE) kbd_push(ch);
+                    else                                app_handle_char(ch);
+                } else {
+                    /* Nav mode: WASD = arrows, DEL = back */
+                    if      (ev.ascii == 'w' || ev.ascii == 'W') { s_nav_pending = NAV_UP;    break; }
+                    else if (ev.ascii == 's' || ev.ascii == 'S') { s_nav_pending = NAV_DOWN;  break; }
+                    else if (ev.ascii == 'a' || ev.ascii == 'A') { s_nav_pending = NAV_LEFT;  break; }
+                    else if (ev.ascii == 'd' || ev.ascii == 'D') { s_nav_pending = NAV_RIGHT; break; }
+                    else if (ev.ascii == 0x7F || ev.ascii == 0x08) { s_nav_pending = NAV_BACK; break; }
+                    /* Menu: number keys jump immediately */
+                    else if (g_app.mode == APP_MODE_MENU
+                             && ev.ascii >= '1' && ev.ascii <= ('0' + APP_MODE__COUNT - 1)) {
+                        s_menu_sel    = ev.ascii - '0';
+                        s_nav_pending = NAV_OK;
+                        break;
+                    }
+                    /* LOS: single-char shortcuts bypass konsole */
+                    else if (g_app.mode == APP_MODE_LOS
+                             && (ev.ascii == 'f' || ev.ascii == 'F'
+                              || ev.ascii == 'c' || ev.ascii == 'C'
+                              || ev.ascii == 'r' || ev.ascii == 'R'
+                              || ev.ascii == 'q' || ev.ascii == 'Q'
+                              || ev.ascii == 'p' || ev.ascii == 'P'
+                              || ev.ascii == '\r')) {
+                        app_handle_char(ev.ascii);
+                        break;
+                    }
+                    /* Konsole only gets raw chars when the console view is active.
+                     * Every other mode routes through app_handle_char. */
+                    else if (g_app.mode == APP_MODE_CONSOLE) {
+                        kbd_push((uint8_t)ev.ascii);
+                    } else {
+                        app_handle_char(ev.ascii);
+                    }
                 }
-                /* LOS mode: single-char shortcuts are immediate, bypass konsole */
-                else if (g_app.mode == APP_MODE_LOS
-                         && (ev.ascii == 'f' || ev.ascii == 'F'
-                          || ev.ascii == 'c' || ev.ascii == 'C'
-                          || ev.ascii == 'r' || ev.ascii == 'R'
-                          || ev.ascii == 'q' || ev.ascii == 'Q'
-                          || ev.ascii == 'p' || ev.ascii == 'P'
-                          || ev.ascii == '\r')) {
-                    app_handle_char(ev.ascii);
-                    break;
-                }
-                kbd_push((uint8_t)ev.ascii);
             }
         }
     }
@@ -214,12 +253,27 @@ static void process_nav(void) {
             }
             if (nav == NAV_OK && n > 0) {
                 csi_select_ap(g_app.los_ap_sel);
-                if (g_app.los_active_mode) csi_active_start();
+                if (g_app.active_mode) csi_active_start();
                 los_start();
                 return;
             }
         }
         if (nav == NAV_OK && g_app.los_state == LOS_IDLE) { los_start(); return; }
+        return;
+    }
+
+    /* ── Training — nav events forwarded to the training state machine */
+    if (g_app.mode == APP_MODE_TRAINING) {
+        if (training_ui() == TRAIN_UI_NAME) {
+            /* In name entry: only Enter/ESC matter; arrow keys ignored */
+            if (nav == NAV_OK)   { training_key('\r');   return; }
+            if (nav == NAV_BACK) { training_key('\x1b'); return; }
+        } else {
+            if (nav == NAV_UP)   { training_key('w');    return; }
+            if (nav == NAV_DOWN) { training_key('s');    return; }
+            if (nav == NAV_OK)   { training_key('\r');   return; }
+            if (nav == NAV_BACK) { training_key('\x1b'); return; }
+        }
         return;
     }
 
@@ -237,7 +291,12 @@ static void process_nav(void) {
 static size_t io_avail(void *ctx) { (void)ctx; return 1024; }
 static size_t io_read(void *ctx,  uint8_t *buf, size_t len) {
     (void)ctx; size_t n = 0;
-    while (n < len && kbd_avail()) { int c = kbd_pop(); if (c >= 0) buf[n++] = (uint8_t)c; }
+    /* Only drain the hardware keyboard into the konsole when the console view
+     * is active.  In all other modes the keyboard is handled by the nav/mode
+     * system; feeding it here too causes double-consumption and phantom input. */
+    if (g_app.mode == APP_MODE_CONSOLE) {
+        while (n < len && kbd_avail()) { int c = kbd_pop(); if (c >= 0) buf[n++] = (uint8_t)c; }
+    }
     if (n < len) {
         int r = Serial.available();
         while (r-- > 0 && n < len) buf[n++] = (uint8_t)Serial.read();
@@ -261,8 +320,36 @@ static const struct konsole_io s_io = {
 };
 
 /* ── Menu navigation state ───────────────────────────────────────────────── */
+/* Start or stop active injection based on current mode and active_mode flag.
+ * LOS manages its own injection lifecycle (starts on AP lock / LOS start),
+ * so apply_active_mode() only acts on the other sensing modes. */
+static void apply_active_mode(void) {
+    switch (g_app.mode) {
+    case APP_MODE_SPECTRUM:
+    case APP_MODE_VARIANCE:
+    case APP_MODE_TRAINING:
+    case APP_MODE_CHANOCCUP:
+        if (g_app.active_mode) csi_active_start();
+        else                   csi_active_stop();
+        break;
+    case APP_MODE_MENU:
+    case APP_MODE_CONSOLE:
+        csi_active_stop();
+        break;
+    default:
+        break;
+    }
+}
+
 static void enter_mode(app_mode_t m) {
+    /* stop chanoccup if leaving it */
+    if (g_app.mode == APP_MODE_CHANOCCUP && m != APP_MODE_CHANOCCUP)
+        chanoccup_stop();
     g_app.mode = m;
+    apply_active_mode();
+    /* start chanoccup scanner after injection is stopped */
+    if (m == APP_MODE_CHANOCCUP)
+        chanoccup_start();
 }
 
 static void menu_up(void) {
@@ -290,7 +377,7 @@ static void app_handle_char(char c) {
             enter_mode((app_mode_t)s_menu_sel);
             return;
         }
-        if (c >= '1' && c <= '6') {
+        if (c >= '1' && c <= ('0' + APP_MODE__COUNT - 1)) {
             s_menu_sel = c - '0';
             enter_mode((app_mode_t)s_menu_sel);
             return;
@@ -298,8 +385,10 @@ static void app_handle_char(char c) {
         return;
     }
 
-    /* Global: ESC or 'm' → back to menu */
-    if (c == 0x1B || c == 'm' || c == 'M') {
+    /* Global: ESC or 'm' → back to menu (training handles its own ESC internally) */
+    if ((c == 0x1B || c == 'm' || c == 'M') && g_app.mode != APP_MODE_TRAINING) {
+        if (g_app.mode == APP_MODE_CHANOCCUP) chanoccup_stop();
+        csi_active_stop();
         g_app.mode = APP_MODE_MENU;
         return;
     }
@@ -310,16 +399,16 @@ static void app_handle_char(char c) {
             if (g_app.los_state == LOS_IDLE) los_start();
             if (g_app.los_state == LOS_SELECTING && csi_ap_count() > 0) {
                 csi_select_ap(g_app.los_ap_sel);
-                if (g_app.los_active_mode) csi_active_start();
+                if (g_app.active_mode) csi_active_start();
                 los_start();
             }
         }
         /* P = toggle active / passive injection mode */
         if (c == 'p' || c == 'P') {
-            g_app.los_active_mode = !g_app.los_active_mode;
+            g_app.active_mode = !g_app.active_mode;
             /* apply immediately if already sensing */
             if (g_app.los_state == LOS_SCANNING || g_app.los_state == LOS_CALIBRATING) {
-                if (g_app.los_active_mode) csi_active_start();
+                if (g_app.active_mode) csi_active_start();
                 else                        csi_active_stop();
             }
         }
@@ -332,21 +421,37 @@ static void app_handle_char(char c) {
             g_app.los_is_scanning = true;
             s_scan_pending        = true;
         }
-        /* C = cycle channel (1→6→11→13→1) */
-        if (c == 'c' || c == 'C') {
-            static const int kCh[] = {1, 6, 11, 13};
-            static int s_ch_idx = 1;   /* default points at ch6 */
-            int cur = g_app.wifi_channel;
-            for (int i = 0; i < 4; i++) if (kCh[i] == cur) { s_ch_idx = i; break; }
-            s_ch_idx = (s_ch_idx + 1) % 4;
-            csi_set_channel(kCh[s_ch_idx]);
-        }
         /* Q = quit LOS */
         if (c == 'q' || c == 'Q') { csi_active_stop(); los_stop(); g_app.mode = APP_MODE_MENU; }
     }
 
+    /* Channel cycling — available in all modes */
+    if (c == 'c' || c == 'C') csi_set_channel(g_app.wifi_channel < 13 ? g_app.wifi_channel + 1 : 1);
     if (c == '+' || c == '=') csi_set_channel(g_app.wifi_channel < 13 ? g_app.wifi_channel + 1 : 1);
     if (c == '-' || c == '_') csi_set_channel(g_app.wifi_channel > 1  ? g_app.wifi_channel - 1 : 13);
+
+    /* P = toggle active/passive in sensing modes (not mid-training-run) */
+    if (c == 'p' || c == 'P') {
+        bool in_spectrum  = (g_app.mode == APP_MODE_SPECTRUM);
+        bool in_variance  = (g_app.mode == APP_MODE_VARIANCE);
+        bool in_chanoccup = (g_app.mode == APP_MODE_CHANOCCUP);
+        bool in_training  = (g_app.mode == APP_MODE_TRAINING
+                             && training_ui() != TRAIN_UI_RUNNING);
+        if (in_spectrum || in_variance || in_chanoccup || in_training) {
+            g_app.active_mode = !g_app.active_mode;
+            apply_active_mode();
+            return;
+        }
+    }
+
+    /* Training mode — forward all keys to the training module */
+    if (g_app.mode == APP_MODE_TRAINING) {
+        app_mode_t before = g_app.mode;
+        training_key(c);
+        /* training may set g_app.mode = MENU internally on ESC; stop injection */
+        if (before != APP_MODE_MENU && g_app.mode == APP_MODE_MENU)
+            csi_active_stop();
+    }
 }
 
 /* ── konsole commands ────────────────────────────────────────────────────── */
@@ -564,9 +669,11 @@ void csi_app_init(void) {
     memset(&g_app, 0, sizeof g_app);
     g_app.mode             = APP_MODE_MENU;
     g_app.wifi_channel     = 6;
-    g_app.los_active_mode  = true;
+    g_app.active_mode = true;
 
     los_init();
+    training_init();
+    chanoccup_init();
 
     /* Start CSI collection on channel 6 by default */
     csi_init(6);
@@ -584,34 +691,52 @@ void csi_app_run(void) {
 
     /* Drain all pending CSI frames immediately — LOS/stats update at CSI rate,
      * not display rate.  s_have_frame is true if at least one frame arrived. */
-    static csi_frame_t s_frame_buf;   /* static: safe to hold pointer across calls */
-    static bool        s_have_frame = false;
+    /* s_frame_buf: last received frame, valid once s_ever_frame is true.
+     * s_new_frame: true if at least one frame arrived since last render — cleared after render. */
+    static csi_frame_t s_frame_buf;
+    static bool        s_ever_frame = false;
+    static bool        s_new_frame  = false;
     {
         csi_frame_t frame;
+        uint32_t now_ms = millis();
         while (csi_pop_frame(&frame)) {
-            los_update(&frame, millis());
-            s_frame_buf = frame;
-            s_have_frame = true;
+            los_update(&frame, now_ms);
+            if (g_app.mode == APP_MODE_TRAINING)
+                training_on_frame(&frame, now_ms);
+            if (g_app.mode == APP_MODE_CHANOCCUP)
+                chanoccup_on_frame(now_ms);
+            s_frame_buf  = frame;
+            s_ever_frame = true;
+            s_new_frame  = true;
         }
     }
 
+    /* Tick state machines that run without CSI frames */
+    if (g_app.mode == APP_MODE_TRAINING)
+        training_tick(millis());
+    if (g_app.mode == APP_MODE_CHANOCCUP)
+        chanoccup_tick(millis());
 
-    /* ── Display — capped at ~15 fps independently of math rate ─────────── */
+    /* ── Display ─────────────────────────────────────────────────────────── */
+    /* Console renders every loop tick — konsole_poll() may have just written
+     * new output, and ui_present() only flushes dirty tiles so it's cheap
+     * when nothing changed.  All other modes are capped at ~15 fps. */
     static uint32_t s_last_render = 0;
     uint32_t now = millis();
-    if ((now - s_last_render) >= 66u) {
-        s_last_render = now;
-        if (s_gfx_ok) {
-            if (g_app.mode == APP_MODE_MENU)
-                ui_draw_menu(s_menu_sel);
-            else if (g_app.mode == APP_MODE_CONSOLE)
-                ui_draw_console(&s_scr[0][0], SCR_COLS+1, SCR_ROWS,
-                                SCR_COLS, s_scr_row, s_scr_col);
-            else
-                ui_render(s_have_frame ? &s_frame_buf : nullptr, nullptr);
-            ui_present();
-        }
-        s_have_frame = false;   /* consumed by renderer */
+    bool do_render = (g_app.mode == APP_MODE_CONSOLE)
+                  || (now - s_last_render) >= 66u;
+    if (do_render && s_gfx_ok) {
+        if (g_app.mode != APP_MODE_CONSOLE)
+            s_last_render = now;
+        if (g_app.mode == APP_MODE_MENU)
+            ui_draw_menu(s_menu_sel);
+        else if (g_app.mode == APP_MODE_CONSOLE)
+            ui_draw_console(&s_scr[0][0], SCR_COLS+1, SCR_ROWS,
+                            SCR_COLS, s_scr_row, s_scr_col);
+        else
+            ui_render(s_ever_frame ? &s_frame_buf : nullptr, nullptr, s_new_frame);
+        ui_present();
+        s_new_frame = false;
     }
 
     /* Deferred AP scan — runs AFTER display already showed "SCANNING..." */
@@ -619,7 +744,7 @@ void csi_app_run(void) {
         s_scan_pending = false;
         /* Force one rendered frame so "SCANNING..." is visible before we block */
         if (s_gfx_ok) {
-            ui_render(nullptr, nullptr);
+            ui_render(s_ever_frame ? &s_frame_buf : nullptr, nullptr, false);
             ui_present();
         }
         csi_scan_aps();

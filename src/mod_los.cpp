@@ -1,29 +1,26 @@
 /*
- * mod_los.cpp — Line-of-Sight disturbance sensing (differential CSI)
+ * mod_los.cpp - Line-of-Sight disturbance sensing (differential CSI)
  *
- * Flow
- * ────
- *   IDLE → user triggers → COUNTDOWN (5 s) → CALIBRATING (80 frame-pairs)
- *   → SCANNING (continuous)
+ * Flow:
+ *   IDLE -> user triggers -> COUNTDOWN (5 s) -> CALIBRATING (80 frame-pairs)
+ *   -> SCANNING (continuous)
  *
  * Algorithm: frame-to-frame differential
- * ───────────────────────────────────────
- *   Calibration: collect |amp[k,n] - amp[k,n-1]| diffs → μ_d[k], σ_d[k]
+ *   Calibration: collect |amp[k,n] - amp[k,n-1]| diffs -> μ_d[k], σ_d[k]
  *   Scanning:    excess[k] = (|diff[k]| - μ_d[k]) / σ_d[k]
  *                score = EMA(Σ clamp(excess, 0, 3) / (3·N_sub) · 100)
  *
- *   At rest  : diff ≈ μ_d  → excess ≈ 0  → score ≈ 0
- *   Movement : diff >> μ_d → excess >> 0 → score spikes
+ *   At rest  : diff ≈ μ_d  -> excess ≈ 0  -> score ≈ 0
+ *   Movement : diff >> μ_d -> excess >> 0 -> score spikes
  *
- * Audio (async FreeRTOS queue → Core 1 task)
- * ────────────────────────────────────────────
+ * Audio (async FreeRTOS queue -> Core 1 task):
  *   score < 20        : silence
  *   score 20..40      : 600 Hz, 60 ms,  period 1800 ms
  *   score 40..65      : 1200 Hz, 80 ms,  period 600 ms
  *   score 65..85      : 2200 Hz, 100 ms, period 200 ms
  *   score > 85        : 3200 Hz, 120 ms, period 80 ms
  *
- *   Armed signal: 3 ascending beeps (600→900→1400 Hz) queued async.
+ *   Armed signal: 3 ascending beeps (600->900->1400 Hz) queued async.
  */
 
 #include <Arduino.h>
@@ -39,14 +36,14 @@ extern "C" {
 #include "sic/audio/amp.h"
 }
 
-/* ── Tuning ──────────────────────────────────────────────────────────────── */
+/* -- Tuning -- */
 #define LOS_COUNTDOWN_S      5
-#define LOS_EMA_TAU_S        0.35f  /* EMA time constant (seconds) — fps-independent */
+#define LOS_EMA_TAU_S        0.35f  /* EMA time constant (seconds) - fps-independent */
 #define LOS_DIFF_SIGMA_EPS   0.5f
 #define LOS_SCORE_MAX_STD    3.0f
 #define LOS_SILENT_BELOW     20.0f
 
-/* ── State ───────────────────────────────────────────────────────────────── */
+/* -- State -- */
 static los_state_t s_state = LOS_IDLE;
 static uint32_t    s_t0    = 0;
 static int         s_cd    = LOS_COUNTDOWN_S;
@@ -65,7 +62,7 @@ static float    s_score     = 0.0f;
 static uint32_t s_beep_next = 0;
 static uint32_t s_scan_last_ts = 0;
 
-/* ── Async audio queue ───────────────────────────────────────────────────── */
+/* -- Async audio queue -- */
 typedef struct { float hz; int dur_ms; int gap_ms; } beep_req_t;
 static QueueHandle_t s_beep_q = nullptr;
 
@@ -98,20 +95,22 @@ static void audio_task(void *) {
     }
 }
 
-/* Non-blocking enqueue — drops silently if queue full */
+/* Non-blocking enqueue - drops silently if queue full */
 static void beep_async(float hz, int dur_ms, int gap_ms = 0) {
     if (!s_beep_q) return;
     beep_req_t b = {hz, dur_ms, gap_ms};
     xQueueSend(s_beep_q, &b, 0);
 }
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
+void los_beep_async(float hz, int dur_ms, int gap_ms) { beep_async(hz, dur_ms, gap_ms); }
+
+/* -- Helpers -- */
 static inline float clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
 /* Geiger-counter style: beep RATE scales with score, tone pitch rises gently.
- * score 20→100 maps to ~1 Hz → ~22 Hz.  Beep duration stays constant (35 ms)
+ * score 20->100 maps to ~1 Hz -> ~22 Hz.  Beep duration stays constant (35 ms)
  * so gaps between clicks shrink as motion increases.
  *
  * Band   score    rate       period   tone
@@ -139,7 +138,7 @@ static void reset_cal(void) {
     memset(s_diff_sigma,  0, sizeof s_diff_sigma);
 }
 
-/* ── Public API ──────────────────────────────────────────────────────────── */
+/* -- Public API -- */
 void los_init(void) {
     s_state = LOS_IDLE;
     s_score = 0.0f;
@@ -213,7 +212,7 @@ void los_update(const csi_frame_t *f, uint32_t now_ms) {
     }
 
     case LOS_CALIBRATING: {
-        int cal_target = g_app.los_active_mode ? CSI_CAL_FRAMES_ACTIVE : CSI_CAL_FRAMES;
+        int cal_target = g_app.active_mode ? CSI_CAL_FRAMES_ACTIVE : CSI_CAL_FRAMES;
         if (s_prev_valid) {
             for (int i = 0; i < CSI_N_SUB; i++) {
                 float d = fabsf((float)f->amp[i] - s_prev[i]);

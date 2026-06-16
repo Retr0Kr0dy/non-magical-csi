@@ -97,7 +97,7 @@ static bool    s_filter = false;
  *   [24-25] SSID IE tag=0 len=0 (wildcard)
  *   [26-35] Supported Rates IE (8 rates)
  * ─────────────────────────────────────────────────────────────────────────*/
-#define CSI_ACTIVE_INTERVAL_MS  10   /* ~100 Hz TX */
+#define CSI_ACTIVE_INTERVAL_MS  100  /* 10 Hz TX — steady drip avoids AP bucket stall */
 
 static TaskHandle_t      s_active_task   = nullptr;
 static volatile bool     s_active_run    = false;
@@ -396,7 +396,7 @@ uint32_t       csi_active_tx_ok(void)  { return s_active_tx_ok; }
 uint32_t       csi_active_tx_err(void) { return s_active_tx_err; }
 
 void csi_active_start(void) {
-    if (!s_filter) { Serial.printf("[CSI] active_start skipped: no target\n"); return; }
-    active_start(s_target);
+    static const uint8_t kBcast[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
+    active_start(s_filter ? s_target : kBcast);
 }
 void csi_active_stop(void)  { active_stop(); }

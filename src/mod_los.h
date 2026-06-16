@@ -19,6 +19,9 @@ int         los_get_cal_progress(void);        /* 0..100                        
 /* Baseline snapshot (for variance view overlay) */
 void los_get_baseline(float *mean_out, float *sigma_out); /* arrays[CSI_N_SUB] */
 
+/* Shared async audio — non-blocking tone enqueue (used by training too) */
+void los_beep_async(float hz, int dur_ms, int gap_ms);
+
 #ifdef __cplusplus
 }
 #endif

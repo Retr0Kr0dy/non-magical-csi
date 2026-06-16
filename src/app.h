@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ── Display geometry ────────────────────────────────────────────────────── */
+/* -- Display geometry -- */
 #ifndef SGFX_W
 #define SGFX_W 240
 #endif
@@ -16,7 +16,7 @@
 #define UI_MAIN_H   (SGFX_H - UI_BAR_H - UI_FOOT_H)
 #define UI_MAIN_YEND (SGFX_H - UI_FOOT_H)
 
-/* ── CSI parameters ──────────────────────────────────────────────────────── */
+/* -- CSI parameters -- */
 /* LLTF HT20: 64 complex pairs (Im,Re int8), valid indices [4..31],[33..60].
  * Excludes DC at 32 and guard bands at 0-3,61-63.  56 valid subcarriers.    */
 #define CSI_N_SUB       56
@@ -25,7 +25,7 @@
 #define CSI_RING_MASK   (CSI_RING_SIZE - 1)
 #define CSI_HIST_LEN    90              /* waterfall / motion history rows    */
 #define CSI_CAL_FRAMES         80      /* passive: ~40-80 s at 1-2 fps       */
-#define CSI_CAL_FRAMES_ACTIVE  500     /* active:  ~10 s at 50 fps           */
+#define CSI_CAL_FRAMES_ACTIVE  100     /* active:  ~10 s at 10 fps           */
 
 typedef struct {
     uint32_t ts_ms;
@@ -35,19 +35,21 @@ typedef struct {
     uint8_t  fwi;                      /* first_word_invalid flag            */
 } csi_frame_t;
 
-/* ── Application modes ───────────────────────────────────────────────────── */
+/* -- Application modes -- */
 typedef enum {
     APP_MODE_MENU = 0,
     APP_MODE_LOS,       /* Line-of-Sight disturbance sensing (calibrated)    */
-    APP_MODE_SPECTRUM,  /* Real-time amplitude waterfall — all subcarriers    */
-    APP_MODE_VARIANCE,  /* Per-subcarrier variance bars — which subs move     */
+    APP_MODE_SPECTRUM,  /* Real-time amplitude waterfall - all subcarriers    */
+    APP_MODE_VARIANCE,  /* Per-subcarrier variance bars - which subs move     */
     APP_MODE_MOTION,    /* Scalar motion score + sparkline history            */
     APP_MODE_CORR,      /* Cross-subcarrier correlation (coherent vs noise)   */
+    APP_MODE_CHANOCCUP, /* Passive per-channel frame-rate survey               */
     APP_MODE_CONSOLE,   /* On-screen serial terminal mirror                   */
+    APP_MODE_TRAINING,  /* Guided ML data-collection session                  */
     APP_MODE__COUNT
 } app_mode_t;
 
-/* ── LOS sub-states ──────────────────────────────────────────────────────── */
+/* -- LOS sub-states -- */
 typedef enum {
     LOS_IDLE = 0,
     LOS_SELECTING,      /* choosing AP or channel                            */
@@ -57,7 +59,7 @@ typedef enum {
 } los_state_t;
 
 
-/* ── Shared application state (read by all modules) ─────────────────────── */
+/* -- Shared application state (read by all modules) -- */
 typedef struct {
     app_mode_t  mode;
     int         wifi_channel;          /* current monitored channel          */
@@ -72,8 +74,8 @@ typedef struct {
     int         los_countdown;         /* seconds remaining                  */
     int         los_cal_progress;      /* 0..100 calibration progress        */
     int         los_ap_sel;            /* AP cursor index during SELECTING   */
-    bool        los_is_scanning;      /* scan in flight — show animation    */
-    bool        los_active_mode;      /* true = inject probes; false = passive sniff */
+    bool        los_is_scanning;      /* scan in flight - show animation    */
+    bool        active_mode;          /* true = inject probes; false = passive sniff */
 } app_state_t;
 
 extern app_state_t g_app;

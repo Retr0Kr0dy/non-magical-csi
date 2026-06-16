@@ -28,6 +28,8 @@
 #include "mod_views.h"
 #include "mod_los.h"
 #include "mod_csi.h"
+#include "mod_training.h"
+#include "mod_chanoccup.h"
 #include "app.h"
 #include "sgfx.h"
 #include "sgfx_fb.h"
@@ -220,13 +222,15 @@ void ui_footbar(const char *hints) {
 
 /* ── MENU ────────────────────────────────────────────────────────────────── */
 static const struct { const char *tag; const char *desc; } kModes[APP_MODE__COUNT] = {
-    { "MENU",    "" },
-    { "LOS",     "Line-of-sight disturbance" },
-    { "SPECTRUM","Subcarrier amplitude waterfall" },
-    { "VARIANCE","Per-subcarrier variance bars" },
-    { "MOTION",  "Scalar motion score + history" },
-    { "CORR",    "Cross-subcarrier correlation" },
-    { "CONSOLE", "Serial console on screen" },
+    { "MENU",     "" },
+    { "LOS",      "Line-of-sight disturbance" },
+    { "SPECTRUM", "Subcarrier amplitude waterfall" },
+    { "VARIANCE", "Per-subcarrier variance bars" },
+    { "MOTION",   "Scalar motion score + history" },
+    { "CORR",     "Cross-subcarrier correlation" },
+    { "CHANOCC",  "Passive per-channel frame-rate survey" },
+    { "CONSOLE",  "Serial console on screen" },
+    { "TRAINING", "Guided ML data-collection session" },
 };
 
 void ui_draw_menu(int sel) {
@@ -237,30 +241,43 @@ void ui_draw_menu(int sel) {
     text2(6, 6, "NON MAGICAL CSI", C_ACCENT);
     hline(0, 27, SGFX_W, C_DIM);
 
-    /* Mode list — one line per mode, 13 px step */
-    int y = 31;
-    for (int i = 1; i < APP_MODE__COUNT; i++) {
+    /* Scrolling mode list */
+    const int ITEM_H  = 13;
+    const int LIST_Y  = 31;
+    const int n_modes = APP_MODE__COUNT - 1;          /* modes 1..n */
+    const int visible = (UI_MAIN_YEND - LIST_Y) / ITEM_H;
+
+    /* Keep selection centred in the window, clamped to valid range */
+    int view_start = sel - visible / 2;
+    if (view_start > n_modes - visible + 1) view_start = n_modes - visible + 1;
+    if (view_start < 1) view_start = 1;
+
+    /* Scroll indicators */
+    if (view_start > 1)
+        text1(SGFX_W - 8, LIST_Y, "^", C_DIM);
+    if (view_start + visible - 1 < n_modes)
+        text1(SGFX_W - 8, LIST_Y + visible * ITEM_H - 9, "v", C_DIM);
+
+    int y = LIST_Y;
+    for (int i = view_start; i < view_start + visible && i < APP_MODE__COUNT; i++) {
         bool active = (i == sel);
         if (active) {
-            fill(0, y - 1, SGFX_W, 13, C_PANEL);
-            vline(0, y - 1, 13, C_ACCENT);   /* accent left bar */
+            fill(0, y - 1, SGFX_W, ITEM_H, C_PANEL);
+            vline(0, y - 1, ITEM_H, C_ACCENT);
         }
         char num[4]; snprintf(num, sizeof num, "%d", i);
         sgfx_rgba8_t nc = active ? C_LABEL : (sgfx_rgba8_t){50,70,90,255};
         sgfx_rgba8_t tc = active ? C_ACCENT : C_TEXT;
         text1(4,  y, num,           nc);
         text1(14, y, kModes[i].tag, tc);
-        y += 13;
+        y += ITEM_H;
     }
 
-    /* Selected description — below list, separated */
-    int desc_y = y + 2;
-    if (sel > 0 && sel < APP_MODE__COUNT) {
-        hline(0, desc_y, SGFX_W, C_DIM);
-        fb_text_clip(4, desc_y + 3, kModes[sel].desc, C_LABEL, 1, SGFX_W - 4);
-    }
-
-    ui_footbar("W/S:select  ENT:open  1-6:jump");
+    /* Description of selected mode in footbar */
+    if (sel > 0 && sel < APP_MODE__COUNT && kModes[sel].desc[0])
+        ui_footbar(kModes[sel].desc);
+    else
+        ui_footbar("W/S:select  ENT:open  1-9:jump");
 }
 
 /* ── LOS mode ────────────────────────────────────────────────────────────── */
@@ -276,11 +293,11 @@ void ui_draw_los(void) {
         hline(6, UI_BAR_H + 28, SGFX_W - 12, C_DIM);
         text1(6, UI_BAR_H + 32, "ENT  start LOS scan", C_LABEL);
         text1(6, UI_BAR_H + 43, "F    find / scan APs", C_LABEL);
-        text1(6, UI_BAR_H + 54, "C    cycle channel (1/6/11/13)", C_LABEL);
+        text1(6, UI_BAR_H + 54, "C    cycle channel (1-13)", C_LABEL);
         text1(6, UI_BAR_H + 65, "R    recalibrate", C_LABEL);
         /* Mode selector */
         text1(6, UI_BAR_H + 77, "P    mode:", C_LABEL);
-        bool am = g_app.los_active_mode;
+        bool am = g_app.active_mode;
         text1(66, UI_BAR_H + 77, "ACTIVE",
               am  ? C_GREEN : (sgfx_rgba8_t){35,55,75,255});
         text1(66 + 42, UI_BAR_H + 77, "/", C_DIM);
@@ -470,7 +487,8 @@ void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
     if (rows_to_draw > 0)
         sgfx_fb_mark_dirty_px(&s_fb, bar_off, wf_y, bar_w * CSI_N_SUB, rows_to_draw);
 
-    ui_footbar("UP/DN:ch  ESC:menu  L:LOS");
+    ui_footbar(g_app.active_mode ? "C/UP/DN:ch  P:passive  ESC:menu"
+                                 : "C/UP/DN:ch  P:active   ESC:menu");
 }
 
 /* ── VARIANCE bars ───────────────────────────────────────────────────────── */
@@ -523,7 +541,8 @@ void ui_draw_variance(const float var[CSI_N_SUB], const float mean_[CSI_N_SUB]) 
     char mvb[20]; snprintf(mvb, sizeof mvb, "max:%.1f", (double)maxv);
     text1(4, UI_MAIN_YEND - 12, mvb, C_LABEL);
 
-    ui_footbar("R:reset  ESC:menu");
+    ui_footbar(g_app.active_mode ? "C:ch  R:reset  P:passive  ESC:menu"
+                                 : "C:ch  R:reset  P:active   ESC:menu");
 }
 
 /* ── MOTION score + sparkline ────────────────────────────────────────────── */
@@ -643,8 +662,295 @@ void ui_draw_console(const char *scr, int stride, int rows, int cols,
     ui_footbar("ESC:menu");
 }
 
+/* ── Training mode ───────────────────────────────────────────────────────── */
+static void draw_progress_bar(int x, int y, int w, int h,
+                              int elapsed_s, int total_s, sgfx_rgba8_t col) {
+    fill(x, y, w, h, C_DIM);
+    if (total_s > 0) {
+        int filled = (elapsed_s * w) / total_s;
+        if (filled > w) filled = w;
+        if (filled > 0) fill(x, y, filled, h, col);
+    }
+    rect(x, y, w, h, C_LABEL);
+}
+
+void ui_draw_training(void) {
+    fill(0, 0, SGFX_W, SGFX_H, C_BG);
+    ui_statusbar("TRAIN");
+
+    train_ui_t ui = training_ui();
+
+    /* ── Procedure selection ─────────────────────────────────────────────── */
+    if (ui == TRAIN_UI_PROC_SEL) {
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        text1(4, UI_BAR_H + 3, "SELECT PROCEDURE", C_ACCENT);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        int y = UI_BAR_H + 17;
+        for (int i = 0; i < TRAIN_PROC__COUNT; i++) {
+            bool sel = (i == training_proc_cursor());
+            if (sel) {
+                fill(0, y - 1, SGFX_W, 13, C_PANEL);
+                vline(0, y - 1, 13, C_ACCENT);
+            }
+            char buf[40];
+            snprintf(buf, sizeof buf, "%d  %s", i + 1, training_proc_name((train_proc_t)i));
+            text1(6, y, buf, sel ? C_TEXT : C_LABEL);
+            y += 14;
+        }
+        ui_footbar(g_app.active_mode ? "W/S:sel  ENT:go  ?:help  P:passive  ESC:menu"
+                                     : "W/S:sel  ENT:go  ?:help  P:active   ESC:menu");
+        return;
+    }
+
+    /* ── Help ────────────────────────────────────────────────────────────── */
+    if (ui == TRAIN_UI_HELP) {
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        char title[32];
+        snprintf(title, sizeof title, "HELP: %s", training_proc_name(training_proc()));
+        text1(4, UI_BAR_H + 3, title, C_ACCENT);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        const char *help = training_proc_help(training_proc());
+        int y = UI_BAR_H + 18;
+        const char *p = help;
+        char line[42];
+        while (*p && y < UI_MAIN_YEND - 10) {
+            int i = 0;
+            while (*p && *p != '\n' && i < 40) line[i++] = *p++;
+            line[i] = '\0';
+            if (*p == '\n') p++;
+            text1(4, y, line, C_LABEL);
+            y += 9;
+        }
+        ui_footbar("ESC/ENT:back");
+        return;
+    }
+
+    /* ── Name entry ──────────────────────────────────────────────────────── */
+    if (ui == TRAIN_UI_NAME) {
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        char title[40];
+        snprintf(title, sizeof title, "SESSION NAME  [%s]",
+                 training_proc_name(training_proc()));
+        text1(4, UI_BAR_H + 3, title, C_ACCENT);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        text1(4, UI_BAR_H + 22, "Name:", C_LABEL);
+
+        {
+            const char *name = training_session_name();
+            int name_len = (int)strlen(name);
+            char cur[34];
+            snprintf(cur, sizeof cur, "%s_", name);
+            /* text2: each char is 12px wide (6px adv × scale 2).
+             * Scroll so cursor is always visible; show '<' when clipped. */
+            const int CHAR_W2  = 12;
+            const int TEXT_X   = 4;
+            const int avail_px = SGFX_W - TEXT_X - 4;
+            int max_vis = avail_px / CHAR_W2;
+            int total   = name_len + 1;   /* +1 for cursor '_' */
+            int offset  = (total > max_vis) ? total - max_vis : 0;
+            if (offset > 0) text1(TEXT_X, UI_BAR_H + 34 + 4, "<", C_DIM);
+            fb_text_clip(TEXT_X, UI_BAR_H + 34, cur + offset, C_TEXT, 2, SGFX_W - 4);
+        }
+
+        text1(4, UI_BAR_H + 62, "alphanum and _ only", C_LABEL);
+        text1(4, UI_BAR_H + 73, "ENT: start  ESC+empty: back", C_LABEL);
+        ui_footbar("type name then ENT to start");
+        return;
+    }
+
+    /* ── Running ─────────────────────────────────────────────────────────── */
+    if (ui == TRAIN_UI_RUNNING) {
+        int total_steps  = training_step_total();
+        int cur_step     = training_step();
+        bool in_cap      = training_in_cap();
+        int remain       = training_remain_s();
+        int phase_dur    = training_phase_dur_s();
+        const char *label = training_step_label();
+        const char *ins1  = training_step_instr1();
+        const char *ins2  = training_step_instr2();
+        const char *next1 = training_next_instr1();
+
+        /* Header: proc name + step counter */
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        char hdr[40];
+        snprintf(hdr, sizeof hdr, "%s  step %d/%d",
+                 training_proc_name(training_proc()), cur_step + 1, total_steps);
+        text1(4, UI_BAR_H + 3, hdr, C_LABEL);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        /* Phase badge row */
+        int y = UI_BAR_H + 17;
+        if (in_cap) {
+            fill(3, y, 8, 8, C_RED);
+            text1(14, y, "REC", C_RED);
+            text1(14 + 3 * 6 + 6, y, label, C_AMBER);
+        } else {
+            fill(3, y, 8, 8, C_DIM);
+            text1(14, y, "MOVE", C_LABEL);
+        }
+        hline(0, y + 10, SGFX_W, C_DIM);
+
+        /* Main instruction — large, bright */
+        y += 14;
+        if (ins1 && ins1[0]) text2(4, y, ins1, C_TEXT);
+        y += 16;
+
+        /* Detail line */
+        if (ins2 && ins2[0]) {
+            text1(4, y, ins2, C_LABEL);
+            y += 10;
+        }
+
+        /* Next step preview — only during capture so user can prep */
+        if (in_cap && next1 && next1[0]) {
+            y += 2;
+            char nbuf[48];
+            snprintf(nbuf, sizeof nbuf, "next: %s", next1);
+            text1(4, y, nbuf, C_DIM);
+            y += 10;
+        }
+
+        /* Progress bar — fills left→right as phase time elapses */
+        y = SGFX_H - UI_FOOT_H - 22;
+        {
+            const int bw = SGFX_W - 8, bh = 7;
+            int dur = phase_dur > 0 ? phase_dur : 1;
+            int elapsed_s = dur - remain;
+            if (elapsed_s < 0) elapsed_s = 0;
+            int filled = (elapsed_s * bw) / dur;
+            if (filled > bw) filled = bw;
+            fill(4, y, bw, bh, C_DIM);
+            if (filled > 0) fill(4, y, filled, bh, in_cap ? C_RED : C_PANEL);
+            rect(4, y, bw, bh, C_LABEL);
+        }
+
+        /* Time + frame count */
+        y += 10;
+        char info[40];
+        snprintf(info, sizeof info, "%ds left   %d frames", remain, training_frames_written());
+        text1(4, y, info, C_LABEL);
+
+        ui_footbar("ESC:abort");
+        return;
+    }
+
+    /* ── Done ────────────────────────────────────────────────────────────── */
+    if (ui == TRAIN_UI_DONE) {
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        text1(4, UI_BAR_H + 3, "SESSION COMPLETE", C_GREEN);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        int y = UI_BAR_H + 22;
+        char buf[48];
+        snprintf(buf, sizeof buf, "frames: %d", training_frames_written());
+        text2(4, y, buf, C_TEXT);
+        y += 20;
+
+        const char *fn = training_filename();
+        text1(4, y, fn, C_ACCENT);
+        y += 12;
+        text1(4, y, "/non-magical-csi/", C_LABEL);
+
+        ui_footbar("ENT/ESC:back to procedure select");
+        return;
+    }
+}
+
+/* ── Channel Occupation survey ───────────────────────────────────────────── */
+static void ui_draw_chanoccup(void) {
+    fill(0, 0, SGFX_W, SGFX_H, C_BG);
+
+    int cur_ch = chanoccup_current_ch();
+    bool settling = chanoccup_settling();
+
+    /* Status bar shows current scanning channel */
+    {
+        char tag[24];
+        snprintf(tag, sizeof tag, "CHANOCC ch%02d%s", cur_ch, settling ? "~" : " ");
+        ui_statusbar(tag);
+    }
+
+    /* Scale is anchored to the historical peak so the view never squishes
+     * when current values are low or zero — bars always reflect relative
+     * activity compared to the busiest moment ever seen this session. */
+    float peak = 1.0f;
+    for (int ch = 1; ch <= 13; ch++) {
+        float p = chanoccup_peak(ch);
+        if (p > peak) peak = p;
+    }
+
+    /* 13 horizontal bars, 8px each, starting at UI_BAR_H */
+    const int BAR_X    = 18;                      /* left edge of bar */
+    const int BAR_W    = SGFX_W - BAR_X - 38;    /* 184px bar area   */
+    const int VAL_X    = BAR_X + BAR_W + 2;
+    const int ROW_H    = 8;
+
+    for (int i = 0; i < 13; i++) {
+        int ch  = i + 1;
+        int y   = UI_BAR_H + i * ROW_H;
+        float f = chanoccup_fps(ch);
+        bool active = (ch == cur_ch);
+
+        /* row background — slightly lighter for current channel */
+        if (active) fill(0, y, SGFX_W, ROW_H, C_PANEL);
+
+        /* channel label */
+        char lbl[4]; snprintf(lbl, sizeof lbl, "%02d", ch);
+        text1(2, y, lbl, active ? C_ACCENT : C_LABEL);
+
+        /* bar fill */
+        int filled = (int)((f / peak) * (float)BAR_W);
+        if (filled > BAR_W) filled = BAR_W;
+        fill(BAR_X, y + 1, BAR_W, ROW_H - 2, C_DIM);
+        if (filled > 0) {
+            /* colour: green→amber→red by fraction of peak */
+            sgfx_rgba8_t bc;
+            float frac = f / peak;
+            if      (frac < 0.4f) bc = C_GREEN;
+            else if (frac < 0.75f) bc = C_AMBER;
+            else                   bc = C_RED;
+            fill(BAR_X, y + 1, filled, ROW_H - 2, bc);
+        }
+
+        /* peak marker — 1px tick at historical max position */
+        float pk = chanoccup_peak(ch);
+        if (pk > 0.0f) {
+            int pk_x = BAR_X + (int)((pk / peak) * (float)(BAR_W - 1));
+            if (pk_x >= BAR_X + BAR_W) pk_x = BAR_X + BAR_W - 1;
+            vline(pk_x, y, ROW_H, C_TEXT);
+        }
+
+        /* fps value: bright if current, dim-grey if stale (last non-zero) */
+        {
+            float disp = f;
+            bool  stale = false;
+            if (f <= 0.0f) {
+                disp  = chanoccup_last_nz(ch);
+                stale = (disp > 0.0f);
+            }
+            if (disp > 0.0f) {
+                char vbuf[8];
+                if (disp < 10.0f) snprintf(vbuf, sizeof vbuf, "%.1f", (double)disp);
+                else               snprintf(vbuf, sizeof vbuf, "%.0f", (double)disp);
+                sgfx_rgba8_t vc = stale ? (sgfx_rgba8_t){55,70,90,255}
+                                        : (active ? C_ACCENT : C_TEXT);
+                text1(VAL_X, y, vbuf, vc);
+            }
+        }
+
+        /* accent stripe on active channel */
+        if (active) vline(0, y, ROW_H, C_ACCENT);
+    }
+
+    ui_footbar(g_app.active_mode ? "C:ch  P:passive  ESC:menu"
+                                 : "C:ch  P:active   ESC:menu");
+}
+
 /* ── Dispatch ────────────────────────────────────────────────────────────── */
-void ui_render(const csi_frame_t *latest, const float *amp_hist_flat) {
+void ui_render(const csi_frame_t *latest, const float *amp_hist_flat, bool new_frame) {
     if (!s_dev) return;
 
     static uint8_t  s_wf[CSI_HIST_LEN][CSI_N_SUB];
@@ -654,7 +960,8 @@ void ui_render(const csi_frame_t *latest, const float *amp_hist_flat) {
     static float    s_var_mean[CSI_N_SUB];
     static uint32_t s_var_n = 0;
 
-    if (latest) {
+    /* Only advance data-dependent state when a genuinely new frame arrived */
+    if (new_frame && latest) {
         for (int i = 0; i < CSI_N_SUB; i++)
             s_wf[s_wf_head][i] = latest->amp[i];
         s_wf_head = (s_wf_head + 1) % CSI_HIST_LEN;
@@ -678,8 +985,7 @@ void ui_render(const csi_frame_t *latest, const float *amp_hist_flat) {
         ui_draw_los();
         break;
     case APP_MODE_SPECTRUM:
-        if (latest)
-            ui_draw_spectrum(latest->amp, s_wf, s_wf_head);
+        if (latest) ui_draw_spectrum(latest->amp, s_wf, s_wf_head);
         break;
     case APP_MODE_VARIANCE: {
         float samplevar[CSI_N_SUB];
@@ -693,6 +999,12 @@ void ui_render(const csi_frame_t *latest, const float *amp_hist_flat) {
         break;
     case APP_MODE_CORR:
         if (latest) ui_draw_corr(latest->amp);
+        break;
+    case APP_MODE_TRAINING:
+        ui_draw_training();
+        break;
+    case APP_MODE_CHANOCCUP:
+        ui_draw_chanoccup();
         break;
     default:
         break;
