@@ -88,16 +88,6 @@ jobs:
           body: |
             ${{ inputs.notes }}
 
-            ## Flash
-
-            ```sh
-            # Cardputer ADV (StampS3A)
-            esptool.py write_flash 0x0 csi-sense-${{ inputs.tag }}-m5-cardputer-adv.bin
-
-            # Cardputer v1/v1.1
-            esptool.py write_flash 0x0 csi-sense-${{ inputs.tag }}-m5-cardputer.bin
-            ```
-
             Built from commit ${{ github.sha }}.
           files: artifacts/*
           draft: false
