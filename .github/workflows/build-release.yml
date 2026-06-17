@@ -54,15 +54,17 @@ jobs:
         id: artifact
         shell: bash
         run: |
-          BIN="$(ls bin/csi-sense-*.bin 2>/dev/null | grep '${{ matrix.env }}' | head -1)"
-          if [ -z "$BIN" ]; then
+          shopt -s nullglob
+          matches=(bin/non-magical-csi-*-${{ matrix.env }}.bin bin/csi-sense-*-${{ matrix.env }}.bin)
+          if [ ${#matches[@]} -eq 0 ]; then
             echo "No artifact found in bin/" >&2
             ls -la bin/ || true
             exit 1
           fi
+          BIN="${matches[0]}"
           echo "path=${BIN}" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$BIN")" >> "$GITHUB_OUTPUT"
-
+          
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
