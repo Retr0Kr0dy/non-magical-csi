@@ -46,6 +46,7 @@ typedef enum {
     APP_MODE_CHANOCCUP, /* Passive per-channel frame-rate survey               */
     APP_MODE_CONSOLE,   /* On-screen serial terminal mirror                   */
     APP_MODE_TRAINING,  /* Guided ML data-collection session                  */
+    APP_MODE_FILEMAN,   /* SD card file browser + delete                      */
     APP_MODE__COUNT
 } app_mode_t;
 

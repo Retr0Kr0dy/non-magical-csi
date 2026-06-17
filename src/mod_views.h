@@ -31,6 +31,7 @@ void ui_draw_corr(const uint8_t amp[CSI_N_SUB]);
 void ui_draw_console(const char *scr, int stride, int rows, int cols,
                      int cur_row, int cur_col);
 void ui_draw_training(void);
+void ui_draw_fileman(void);
 
 /* Shared helpers */
 void ui_statusbar(const char *mode_tag);

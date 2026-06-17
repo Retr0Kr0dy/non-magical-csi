@@ -52,6 +52,7 @@ extern "C" {
 #include "mod_los.h"
 #include "mod_training.h"
 #include "mod_chanoccup.h"
+#include "mod_fileman.h"
 #include "mod_views.h"
 
 /* ── Global app state ───────────────────────────────────────────────────── */
@@ -262,18 +263,39 @@ static void process_nav(void) {
         return;
     }
 
-    /* ── Training — nav events forwarded to the training state machine */
+    /* -- Training: nav events forwarded to the training state machine */
     if (g_app.mode == APP_MODE_TRAINING) {
-        if (training_ui() == TRAIN_UI_NAME) {
-            /* In name entry: only Enter/ESC matter; arrow keys ignored */
+        train_ui_t tui = training_ui();
+        if (tui == TRAIN_UI_NAME) {
+            /* In text entry: only Enter/ESC matter; arrow keys ignored */
             if (nav == NAV_OK)   { training_key('\r');   return; }
             if (nav == NAV_BACK) { training_key('\x1b'); return; }
         } else {
-            if (nav == NAV_UP)   { training_key('w');    return; }
-            if (nav == NAV_DOWN) { training_key('s');    return; }
-            if (nav == NAV_OK)   { training_key('\r');   return; }
-            if (nav == NAV_BACK) { training_key('\x1b'); return; }
+            if (nav == NAV_UP)    { training_key('w'); return; }
+            if (nav == NAV_DOWN)  { training_key('s'); return; }
+            if (nav == NAV_LEFT)  { training_key('a'); return; }
+            if (nav == NAV_RIGHT) { training_key('d'); return; }
+            if (nav == NAV_OK)    { training_key('\r');   return; }
+            if (nav == NAV_BACK)  { training_key('\x1b'); return; }
         }
+        return;
+    }
+
+    /* ── File manager ── */
+    if (g_app.mode == APP_MODE_FILEMAN) {
+        if (nav == NAV_BACK) {
+            const char *cwd = fileman_cwd();
+            if (fileman_mode() == FM_BROWSE && cwd[0] == '/' && cwd[1] == '\0')
+                g_app.mode = APP_MODE_MENU;
+            else
+                fileman_key('a');
+            return;
+        }
+        if (nav == NAV_UP)    { fileman_key('w');  return; }
+        if (nav == NAV_DOWN)  { fileman_key('s');  return; }
+        if (nav == NAV_LEFT)  { fileman_key('a');  return; }
+        if (nav == NAV_RIGHT) { fileman_key('\r'); return; }
+        if (nav == NAV_OK)    { fileman_key('\r'); return; }
         return;
     }
 
@@ -334,6 +356,7 @@ static void apply_active_mode(void) {
         break;
     case APP_MODE_MENU:
     case APP_MODE_CONSOLE:
+    case APP_MODE_FILEMAN:
         csi_active_stop();
         break;
     default:
@@ -350,6 +373,8 @@ static void enter_mode(app_mode_t m) {
     /* start chanoccup scanner after injection is stopped */
     if (m == APP_MODE_CHANOCCUP)
         chanoccup_start();
+    if (m == APP_MODE_FILEMAN)
+        fileman_init();
 }
 
 static void menu_up(void) {
@@ -457,7 +482,7 @@ static void app_handle_char(char c) {
 /* ── konsole commands ────────────────────────────────────────────────────── */
 static int cmd_sys(struct konsole *ks, int argc, char **argv) {
     (void)argc; (void)argv;
-    kon_printf(ks, "fw      : csi-sense %s\r\n", CSI_SENSE_VERSION);
+    kon_printf(ks, "fw      : " KONSOLE_FW_NAME " %s\r\n", CSI_SENSE_VERSION);
     kon_printf(ks, "board   : %s\r\n", BOARD_NAME);
     kon_printf(ks, "uptime  : %u ms\r\n", (unsigned)millis());
     kon_printf(ks, "display : %dx%d\r\n", SGFX_W, SGFX_H);
@@ -621,13 +646,13 @@ static const struct kon_cmd g_cmds[] = {
 /* ── Splash screen ───────────────────────────────────────────────────────── */
 static void splash(void) {
     if (!s_gfx_ok) return;
-    sgfx_clear(&s_gfx, (sgfx_rgba8_t){5,10,18,255});
+    sgfx_clear(&s_gfx, (sgfx_rgba8_t){0,10,2,255});
 
-    sgfx_text5x7_scaled(&s_gfx, 21, 10, "NON MAGICAL", (sgfx_rgba8_t){0,180,255,255}, 3, 3);
-    sgfx_text5x7_scaled(&s_gfx, 84, 38, "CSI", (sgfx_rgba8_t){0,220,60,255}, 4, 4);
-    sgfx_text5x7       (&s_gfx,  8, 74, "wifi channel state imaging", (sgfx_rgba8_t){110,140,165,255});
-    sgfx_text5x7       (&s_gfx,  8, 92, "v" CSI_SENSE_VERSION "  " BOARD_NAME, (sgfx_rgba8_t){70,90,110,255});
-    sgfx_text5x7       (&s_gfx,  8,102, "WiFi CSI: fading != radar", (sgfx_rgba8_t){70,90,110,255});
+    sgfx_text5x7_scaled(&s_gfx, 21, 10, "NON MAGICAL", (sgfx_rgba8_t){204,255,68,255}, 3, 3);
+    sgfx_text5x7_scaled(&s_gfx, 84, 38, "CSI", (sgfx_rgba8_t){51,255,85,255}, 4, 4);
+    sgfx_text5x7       (&s_gfx,  8, 74, "wifi channel state imaging", (sgfx_rgba8_t){26,170,51,255});
+    sgfx_text5x7       (&s_gfx,  8, 92, "v" CSI_SENSE_VERSION "  " BOARD_NAME, (sgfx_rgba8_t){8,68,20,255});
+    sgfx_text5x7       (&s_gfx,  8,102, "WiFi CSI: fading != radar", (sgfx_rgba8_t){8,68,20,255});
 
     sgfx_present(&s_gfx);
     delay(1800);
@@ -689,6 +714,25 @@ void csi_app_run(void) {
     process_nav();
     konsole_poll(&g_ks);
 
+    /* Stop WiFi in idle modes (MENU, FILEMAN); restart when entering sensing modes.
+     * Checked after all input handlers so every code path that sets g_app.mode
+     * (direct assignments, enter_mode, training self-exit) is covered. */
+    {
+        static app_mode_t s_prev_mode = APP_MODE__COUNT;
+        if (g_app.mode != s_prev_mode) {
+            bool was_idle = (s_prev_mode == APP_MODE_MENU
+                          || s_prev_mode == APP_MODE_FILEMAN
+                          || s_prev_mode == APP_MODE__COUNT);
+            bool is_idle  = (g_app.mode == APP_MODE_MENU
+                          || g_app.mode == APP_MODE_FILEMAN);
+            if (!was_idle && is_idle && g_app.csi_running)
+                csi_deinit();
+            if (was_idle && !is_idle && !g_app.csi_running)
+                csi_init(g_app.wifi_channel);
+            s_prev_mode = g_app.mode;
+        }
+    }
+
     /* Drain all pending CSI frames immediately — LOS/stats update at CSI rate,
      * not display rate.  s_have_frame is true if at least one frame arrived. */
     /* s_frame_buf: last received frame, valid once s_ever_frame is true.
@@ -716,6 +760,8 @@ void csi_app_run(void) {
         training_tick(millis());
     if (g_app.mode == APP_MODE_CHANOCCUP)
         chanoccup_tick(millis());
+    if (g_app.mode == APP_MODE_FILEMAN)
+        fileman_tick(millis());
 
     /* ── Display ─────────────────────────────────────────────────────────── */
     /* Console renders every loop tick — konsole_poll() may have just written

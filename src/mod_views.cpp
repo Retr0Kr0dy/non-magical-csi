@@ -9,16 +9,20 @@
  *   [12..124]  main area  (113 px): mode-specific content
  *   [125..134] foot bar   (10 px):  keyboard hints
  *
- * Color palette
- * ─────────────
- *   C_BG     ( 5, 10, 18)  very dark navy
- *   C_TEXT   (200,220,235) pale blue-white
- *   C_ACCENT (  0,180,255) cyan
- *   C_GREEN  (  0,220, 60) green
- *   C_AMBER  (255,160,  0) amber
- *   C_RED    (255, 48, 32) red
- *   C_DIM    ( 18, 45, 70) dim blue (bar backgrounds)
- *   C_LABEL  (110,140,165) grey-blue label text
+ * Color palette  (phosphor green / tactical NVG theme)
+ * -----------------------------------------------------
+ *   C_BG     (  0, 10,  2) near-black, green tint
+ *   C_TEXT   ( 51,255, 85) phosphor green  (primary text)
+ *   C_ACCENT (204,255, 68) yellow-green  (selection, headings, mode tag)
+ *   C_GREEN  ( 51,255, 85) phosphor green  (static, active, success)
+ *   C_AMBER  (255, 51,  0) orange-red  (caution, motion, scanning)
+ *   C_RED    (220, 20,  0) alert red  (high motion, recording)
+ *   C_DIM    (  8, 68, 20) dark green  (bar fills, separator lines)
+ *   C_LABEL  ( 26,170, 51) medium green  (secondary text)
+ *   C_DARK   (  0,  5,  1) near-pure black  (statusbar/footer bg)
+ *   C_BAR_HI (160,255, 50) yellow-green  (high-signal bars)
+ *   C_BAR_LO (  5, 40, 12) dark green  (low-signal bars)
+ *   C_PANEL  (  4, 28,  8) very dark green  (panel/selection bg)
  */
 
 #include <Arduino.h>
@@ -30,24 +34,25 @@
 #include "mod_csi.h"
 #include "mod_training.h"
 #include "mod_chanoccup.h"
+#include "mod_fileman.h"
 #include "app.h"
 #include "sgfx.h"
 #include "sgfx_fb.h"
 #include "sgfx_font_builtin.h"
 
-/* ── Palette ─────────────────────────────────────────────────────────────── */
-#define C_BG     ((sgfx_rgba8_t){  5, 10, 18,255})
-#define C_TEXT   ((sgfx_rgba8_t){200,220,235,255})
-#define C_ACCENT ((sgfx_rgba8_t){  0,180,255,255})
-#define C_GREEN  ((sgfx_rgba8_t){  0,220, 60,255})
-#define C_AMBER  ((sgfx_rgba8_t){255,160,  0,255})
-#define C_RED    ((sgfx_rgba8_t){255, 48, 32,255})
-#define C_DIM    ((sgfx_rgba8_t){ 18, 45, 70,255})
-#define C_LABEL  ((sgfx_rgba8_t){110,140,165,255})
-#define C_DARK   ((sgfx_rgba8_t){  2,  5, 10,255})
-#define C_BAR_HI ((sgfx_rgba8_t){  0,200,255,255})
-#define C_BAR_LO ((sgfx_rgba8_t){ 10, 60,120,255})
-#define C_PANEL  ((sgfx_rgba8_t){  8, 20, 36,255})
+/* -- Palette -- */
+#define C_BG     ((sgfx_rgba8_t){  0, 10,  2,255})
+#define C_TEXT   ((sgfx_rgba8_t){ 51,255, 85,255})
+#define C_ACCENT ((sgfx_rgba8_t){204,255, 68,255})
+#define C_GREEN  ((sgfx_rgba8_t){ 51,255, 85,255})
+#define C_AMBER  ((sgfx_rgba8_t){255, 51,  0,255})
+#define C_RED    ((sgfx_rgba8_t){220, 20,  0,255})
+#define C_DIM    ((sgfx_rgba8_t){  8, 68, 20,255})
+#define C_LABEL  ((sgfx_rgba8_t){ 26,170, 51,255})
+#define C_DARK   ((sgfx_rgba8_t){  0,  5,  1,255})
+#define C_BAR_HI ((sgfx_rgba8_t){160,255, 50,255})
+#define C_BAR_LO ((sgfx_rgba8_t){  5, 40, 12,255})
+#define C_PANEL  ((sgfx_rgba8_t){  4, 28,  8,255})
 
 static sgfx_device_t  *s_dev = nullptr;
 static sgfx_fb_t       s_fb;
@@ -136,22 +141,25 @@ static inline void rect(int x, int y, int w, int h, sgfx_rgba8_t c) {
     fb_fill(x+w-1, y+1,   1, h-2, c);
 }
 
-/* amplitude (0..255) → waterfall heat color */
+/* amplitude (0..255) -> waterfall heat color
+ * near-black (low) -> medium green (mid) -> yellow-green (high) */
 static sgfx_rgba8_t heat(uint8_t v) {
     if (v < 128) {
         uint8_t t = v * 2;
+        /* (0,10,2) -> (26,170,51) */
         return (sgfx_rgba8_t){
-            (uint8_t)(5  - (uint8_t)(5  * t / 255)),
-            (uint8_t)(10 + (uint8_t)(190 * t / 255)),
-            (uint8_t)(18 + (uint8_t)(237 * t / 255)),
+            (uint8_t)(  0 + (uint8_t)( 26 * t / 255)),
+            (uint8_t)( 10 + (uint8_t)(160 * t / 255)),
+            (uint8_t)(  2 + (uint8_t)( 49 * t / 255)),
             255
         };
     } else {
         uint8_t t = (v - 128) * 2;
+        /* (26,170,51) -> (204,255,68) */
         return (sgfx_rgba8_t){
-            (uint8_t)(0  + t),
-            (uint8_t)(200 + (uint8_t)(55 * t / 255)),
-            255,
+            (uint8_t)( 26 + (uint8_t)(178 * t / 255)),
+            (uint8_t)(170 + (uint8_t)( 85 * t / 255)),
+            (uint8_t)( 51 + (uint8_t)( 17 * t / 255)),
             255
         };
     }
@@ -161,7 +169,7 @@ static sgfx_rgba8_t heat(uint8_t v) {
 static sgfx_rgba8_t score_color(float s) {
     if (s < 20.0f) return C_GREEN;
     if (s < 45.0f) return C_AMBER;
-    if (s < 75.0f) return (sgfx_rgba8_t){255,100,0,255};
+    if (s < 75.0f) return (sgfx_rgba8_t){255, 51, 0,255};
     return C_RED;
 }
 
@@ -231,6 +239,7 @@ static const struct { const char *tag; const char *desc; } kModes[APP_MODE__COUN
     { "CHANOCC",  "Passive per-channel frame-rate survey" },
     { "CONSOLE",  "Serial console on screen" },
     { "TRAINING", "Guided ML data-collection session" },
+    { "FILES",    "SD card file browser" },
 };
 
 void ui_draw_menu(int sel) {
@@ -266,7 +275,7 @@ void ui_draw_menu(int sel) {
             vline(0, y - 1, ITEM_H, C_ACCENT);
         }
         char num[4]; snprintf(num, sizeof num, "%d", i);
-        sgfx_rgba8_t nc = active ? C_LABEL : (sgfx_rgba8_t){50,70,90,255};
+        sgfx_rgba8_t nc = active ? C_LABEL : (sgfx_rgba8_t){ 8,55,18,255};
         sgfx_rgba8_t tc = active ? C_ACCENT : C_TEXT;
         text1(4,  y, num,           nc);
         text1(14, y, kModes[i].tag, tc);
@@ -299,10 +308,10 @@ void ui_draw_los(void) {
         text1(6, UI_BAR_H + 77, "P    mode:", C_LABEL);
         bool am = g_app.active_mode;
         text1(66, UI_BAR_H + 77, "ACTIVE",
-              am  ? C_GREEN : (sgfx_rgba8_t){35,55,75,255});
+              am  ? C_GREEN : (sgfx_rgba8_t){ 8,42,14,255});
         text1(66 + 42, UI_BAR_H + 77, "/", C_DIM);
         text1(66 + 50, UI_BAR_H + 77, "PASSIVE",
-              !am ? C_TEXT  : (sgfx_rgba8_t){35,55,75,255});
+              !am ? C_TEXT  : (sgfx_rgba8_t){ 8,42,14,255});
         ui_footbar("ENT:start  F:scan  P:mode  ESC:menu");
         return;
     }
@@ -332,7 +341,7 @@ void ui_draw_los(void) {
                 char buf[32];
                 snprintf(buf, sizeof buf, "ch%-2d %4ddBm",
                          csi_ap_channel(i), (int)csi_ap_rssi(i));
-                text1(4,  y, buf, active ? C_LABEL : (sgfx_rgba8_t){60,80,100,255});
+                text1(4,  y, buf, active ? C_LABEL : (sgfx_rgba8_t){10,55,20,255});
                 fb_text_clip(76, y, csi_ap_ssid(i), tc, 1, SGFX_W - 4);
                 y += 13;
             }
@@ -379,7 +388,7 @@ void ui_draw_los(void) {
         fill(bx, by, bw, bh, C_DIM);
         int filled = bw * prog / 100;
         if (filled > 0) fill(bx, by, filled, bh, C_ACCENT);
-        rect(bx, by, bw, bh, (sgfx_rgba8_t){30,70,110,255});
+        rect(bx, by, bw, bh, (sgfx_rgba8_t){10,80,25,255});
 
         char pct[8]; snprintf(pct, sizeof pct, "%d%%", prog);
         text1(bx, by + bh + 4, pct, C_TEXT);
@@ -405,7 +414,7 @@ void ui_draw_los(void) {
     fill(bx, by, bw, 10, C_DIM);
     int filled = (int)(bw * score / 100.0f);
     if (filled > 0) fill(bx, by, filled, 10, sc);
-    rect(bx, by, bw, 10, (sgfx_rgba8_t){25,55,90,255});
+    rect(bx, by, bw, 10, (sgfx_rgba8_t){10,80,25,255});
 
     /* Status text */
     int ty = by + 14;
@@ -467,10 +476,10 @@ void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
     {
         int dc_x = bar_off + 23 * bar_w;
         int dc_w = 10 * bar_w;
-        fill(dc_x, chart_y, dc_w, chart_h, (sgfx_rgba8_t){12,25,42,255});
+        fill(dc_x, chart_y, dc_w, chart_h, (sgfx_rgba8_t){ 2,14, 5,255});
         /* "DC" label centred over the gap */
         int lx = dc_x + dc_w / 2 - 6;
-        text1(lx, chart_y + (chart_h - 7) / 2, "DC", (sgfx_rgba8_t){40,70,100,255});
+        text1(lx, chart_y + (chart_h - 7) / 2, "DC", (sgfx_rgba8_t){16,80,28,255});
     }
 
     /* Direct row writes — avoid 56*rows fill() + dirty-tile calls per frame */
@@ -502,6 +511,10 @@ void ui_draw_variance(const float var[CSI_N_SUB], const float mean_[CSI_N_SUB]) 
 
     /* Header */
     text1(4, UI_BAR_H + 2, "per-subcarrier variance", C_LABEL);
+    {
+        char mvb[20]; snprintf(mvb, sizeof mvb, "max:%.1f", (double)maxv);
+        text1(SGFX_W - 2 - (int)strlen(mvb) * 6, UI_BAR_H + 2, mvb, C_LABEL);
+    }
 
     int ay  = UI_BAR_H + 13;
     int ah  = UI_MAIN_YEND - ay - 16;
@@ -514,10 +527,11 @@ void ui_draw_variance(const float var[CSI_N_SUB], const float mean_[CSI_N_SUB]) 
         fill(x, ay, bar_w - 1, ah, C_DIM);
         if (bh > 0) {
             float t = var[i] / maxv;
+            /* medium green (26,170,51) -> yellow-green (204,255,68) */
             sgfx_rgba8_t bc = {
-                (uint8_t)(uint8_t)(255 * t),
-                (uint8_t)(180 - (uint8_t)(180 * t)),
-                (uint8_t)(255 - (uint8_t)(200 * t)),
+                (uint8_t)( 26 + (uint8_t)(178 * t)),
+                (uint8_t)(170 + (uint8_t)( 85 * t)),
+                (uint8_t)( 51 + (uint8_t)( 17 * t)),
                 255
             };
             fill(x, ay + ah - bh, bar_w - 1, bh, bc);
@@ -532,14 +546,11 @@ void ui_draw_variance(const float var[CSI_N_SUB], const float mean_[CSI_N_SUB]) 
     {
         int dc_x = bar_off + 23 * bar_w;
         int dc_w = 10 * bar_w;
-        fill(dc_x, ay, dc_w, ah, (sgfx_rgba8_t){10,20,34,255});
+        fill(dc_x, ay, dc_w, ah, (sgfx_rgba8_t){ 2,12, 4,255});
         int lx = dc_x + dc_w / 2 - 6;
-        text1(lx, ay + ah / 2 - 4, "DC", (sgfx_rgba8_t){40,70,100,255});
-        text1(lx - 6, ay + ah / 2 + 4, "NULL", (sgfx_rgba8_t){35,55,80,255});
+        text1(lx, ay + ah / 2 - 4, "DC", (sgfx_rgba8_t){16,80,28,255});
+        text1(lx - 6, ay + ah / 2 + 4, "NULL", (sgfx_rgba8_t){12,68,22,255});
     }
-
-    char mvb[20]; snprintf(mvb, sizeof mvb, "max:%.1f", (double)maxv);
-    text1(4, UI_MAIN_YEND - 12, mvb, C_LABEL);
 
     ui_footbar(g_app.active_mode ? "C:ch  R:reset  P:passive  ESC:menu"
                                  : "C:ch  R:reset  P:active   ESC:menu");
@@ -597,7 +608,7 @@ void ui_draw_motion(float score, const float hist[CSI_HIST_LEN]) {
     /* Threshold line at 20/100 */
     int thr_y = sy + sh - 2 - (int)((float)(sh - 4) * 20.0f / hmax);
     if (thr_y >= sy && thr_y < sy + sh)
-        hline(sx + 1, thr_y, sw - 2, (sgfx_rgba8_t){60,80,40,255});
+        hline(sx + 1, thr_y, sw - 2, (sgfx_rgba8_t){ 8,68,20,255});
 
     /* Stats below sparkline */
     float sum = 0, mx = 0;
@@ -857,9 +868,114 @@ void ui_draw_training(void) {
         ui_footbar("ENT/ESC:back to procedure select");
         return;
     }
+
+    /* -- Free mode: label selector (labels from last non-free procedure) -- */
+    if (ui == TRAIN_UI_FREE_LABEL) {
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        char title[48];
+        snprintf(title, sizeof title, "FREE  [%s labels]",
+                 training_proc_name(training_free_src_proc()));
+        text1(4, UI_BAR_H + 3, title, C_ACCENT);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        int y = UI_BAR_H + 17;
+        int count  = training_free_label_count();
+        int cursor = training_free_label_cursor();
+        for (int i = 0; i < count; i++, y += 14) {
+            bool sel = (i == cursor);
+            if (sel) {
+                fill(0, y - 1, SGFX_W, 13, C_PANEL);
+                vline(0, y - 1, 13, C_ACCENT);
+            }
+            text1(6, y, training_free_label_at(i), sel ? C_TEXT : C_LABEL);
+        }
+        ui_footbar("W/S:select  ENT:confirm  ESC:menu");
+        return;
+    }
+
+    /* -- Free mode: cooldown + duration config -- */
+    if (ui == TRAIN_UI_FREE_CFG) {
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        text1(4, UI_BAR_H + 3, "FREE RECORD - TIMING", C_ACCENT);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        int y = UI_BAR_H + 17;
+        {
+            char info[64];
+            snprintf(info, sizeof info, "%s > %s",
+                     training_session_name(), training_free_label());
+            text1(4, y, info, C_LABEL);
+        }
+        y += 10;
+        hline(0, y, SGFX_W, C_DIM);
+        y += 5;
+
+        int field = training_free_cfg_field();
+        const char *field_labels[2] = { "Cooldown:", "Duration:" };
+        int field_vals[2] = { training_free_cooldown(), training_free_cap_s() };
+
+        for (int f = 0; f < 2; f++, y += 16) {
+            bool sel = (f == field);
+            if (sel) {
+                fill(0, y - 2, SGFX_W, 14, C_PANEL);
+                vline(0, y - 2, 14, C_ACCENT);
+            }
+            char row[32];
+            snprintf(row, sizeof row, "%s  %d s", field_labels[f], field_vals[f]);
+            text1(6, y, row, sel ? C_TEXT : C_LABEL);
+            if (sel) text1(SGFX_W - 7 * 6, y, "A:- D:+", C_DIM);
+        }
+
+        y += 4;
+        hline(0, y, SGFX_W, C_DIM);
+        y += 5;
+        text1(4, y, g_app.active_mode ? "mode: active" : "mode: passive", C_DIM);
+
+        ui_footbar(g_app.active_mode
+            ? "W/S:field  A/D:adj  P:passive  ENT:start  ESC:back"
+            : "W/S:field  A/D:adj  P:active   ENT:start  ESC:back");
+        return;
+    }
+
+    /* -- Free mode: capture done -- */
+    if (ui == TRAIN_UI_FREE_DONE) {
+        fill(0, UI_BAR_H, SGFX_W, 14, C_PANEL);
+        text1(4, UI_BAR_H + 3, "CAPTURE DONE", C_GREEN);
+        hline(0, UI_BAR_H + 13, SGFX_W, C_DIM);
+
+        int y = UI_BAR_H + 17;
+        {
+            char lbuf[40];
+            snprintf(lbuf, sizeof lbuf, "label: %s", training_free_label());
+            text1(4, y, lbuf, C_ACCENT);
+        }
+        y += 10;
+        hline(0, y, SGFX_W, C_DIM);
+        y += 5;
+
+        char fbuf[24];
+        snprintf(fbuf, sizeof fbuf, "%d frames", training_frames_written());
+        text2(4, y, fbuf, C_TEXT);
+        y += 20;
+
+        char dbuf[32];
+        snprintf(dbuf, sizeof dbuf, "dur %ds  cooldown %ds",
+                 training_free_cap_s(), training_free_cooldown());
+        text1(4, y, dbuf, C_LABEL);
+        y += 12;
+
+        const char *fn = training_filename();
+        text1(4, y, fn, C_DIM);
+        y += 14;
+
+        text1(4, y, "R:repeat   N:new label", C_ACCENT);
+
+        ui_footbar("R:repeat  N:new label  ESC:finish");
+        return;
+    }
 }
 
-/* ── Channel Occupation survey ───────────────────────────────────────────── */
+/* -- Channel Occupation survey -- */
 static void ui_draw_chanoccup(void) {
     fill(0, 0, SGFX_W, SGFX_H, C_BG);
 
@@ -935,7 +1051,7 @@ static void ui_draw_chanoccup(void) {
                 char vbuf[8];
                 if (disp < 10.0f) snprintf(vbuf, sizeof vbuf, "%.1f", (double)disp);
                 else               snprintf(vbuf, sizeof vbuf, "%.0f", (double)disp);
-                sgfx_rgba8_t vc = stale ? (sgfx_rgba8_t){55,70,90,255}
+                sgfx_rgba8_t vc = stale ? (sgfx_rgba8_t){20,65,28,255}
                                         : (active ? C_ACCENT : C_TEXT);
                 text1(VAL_X, y, vbuf, vc);
             }
@@ -947,6 +1063,80 @@ static void ui_draw_chanoccup(void) {
 
     ui_footbar(g_app.active_mode ? "C:ch  P:passive  ESC:menu"
                                  : "C:ch  P:active   ESC:menu");
+}
+
+/* ── File manager ───────────────────────────────────────────────────────── */
+void ui_draw_fileman(void) {
+    fill(0, 0, SGFX_W, SGFX_H, C_BG);
+    ui_statusbar("FILES");
+
+    if (!fileman_sd_ok()) {
+        fill(0, UI_BAR_H, SGFX_W, UI_MAIN_H, C_BG);
+        text2(6, UI_BAR_H + 20, "NO CARD", C_RED);
+        text1(6, UI_BAR_H + 44, "insert SD card and re-enter", C_LABEL);
+        ui_footbar("ESC:menu");
+        return;
+    }
+
+    /* path header */
+    fb_text_clip(4, UI_BAR_H + 2, fileman_cwd(), C_LABEL, 1, SGFX_W - 4);
+    hline(0, UI_BAR_H + 11, SGFX_W, C_DIM);
+
+    if (fileman_mode() == FM_CONFIRM) {
+        text2(6, UI_BAR_H + 18, "DELETE FILE?", C_AMBER);
+        fb_text_clip(6, UI_BAR_H + 40, fileman_confirm_name(), C_TEXT, 1, SGFX_W - 8);
+        hline(6, UI_BAR_H + 51, SGFX_W - 12, C_DIM);
+        text1(6, UI_BAR_H + 56, "OK:delete   BACK:cancel", C_LABEL);
+        ui_footbar("OK:confirm  BACK:cancel");
+        return;
+    }
+
+    if (fileman_mode() == FM_MSG) {
+        text2(6, UI_BAR_H + 30, fileman_msg(), C_ACCENT);
+        ui_footbar("");
+        return;
+    }
+
+    int n = fileman_count();
+    if (n == 0) {
+        text1(4, UI_BAR_H + 25, "(empty)", C_DIM);
+    } else {
+        const int ITEM_H = 13;
+        const int LIST_Y = UI_BAR_H + 13;
+        int vis    = (UI_MAIN_YEND - LIST_Y) / ITEM_H;
+        int scroll = fileman_scroll();
+        int cursor = fileman_cursor();
+
+        for (int i = scroll; i < n && i < scroll + vis; i++) {
+            int  y   = LIST_Y + (i - scroll) * ITEM_H;
+            bool sel = (i == cursor);
+            if (sel) {
+                fill(0, y - 1, SGFX_W, ITEM_H, C_PANEL);
+                vline(0, y - 1, ITEM_H, C_ACCENT);
+            }
+            if (fileman_is_dir(i)) {
+                text1(6, y, "/", C_LABEL);
+                fb_text_clip(12, y, fileman_name(i), sel ? C_ACCENT : C_TEXT, 1, SGFX_W - 6);
+            } else {
+                fb_text_clip(6, y, fileman_name(i), sel ? C_ACCENT : C_TEXT, 1, SGFX_W - 68);
+                char sb[12];
+                long sz = fileman_size(i);
+                if      (sz < 1024L)         snprintf(sb, sizeof sb, "%ldb",  sz);
+                else if (sz < 1024L * 1024L) snprintf(sb, sizeof sb, "%ldK",  sz / 1024L);
+                else                         snprintf(sb, sizeof sb, "%ldM",  sz / (1024L * 1024L));
+                text1(SGFX_W - 4 - (int)strlen(sb) * 6, y, sb, sel ? C_LABEL : C_DIM);
+            }
+        }
+        if (scroll > 0)
+            text1(SGFX_W - 8, LIST_Y, "^", C_DIM);
+        if (scroll + vis < n)
+            text1(SGFX_W - 8, LIST_Y + vis * ITEM_H - 7, "v", C_DIM);
+    }
+
+    const char *cwd = fileman_cwd();
+    bool at_root = (cwd[0] == '/' && cwd[1] == '\0');
+    ui_footbar(at_root ? "OK:open/del  ESC:menu"
+                       : "OK:open/del  A:up  ESC:menu");
 }
 
 /* ── Dispatch ────────────────────────────────────────────────────────────── */
@@ -1005,6 +1195,9 @@ void ui_render(const csi_frame_t *latest, const float *amp_hist_flat, bool new_f
         break;
     case APP_MODE_CHANOCCUP:
         ui_draw_chanoccup();
+        break;
+    case APP_MODE_FILEMAN:
+        ui_draw_fileman();
         break;
     default:
         break;
