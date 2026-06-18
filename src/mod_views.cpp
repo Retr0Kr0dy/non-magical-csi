@@ -59,6 +59,19 @@ static sgfx_fb_t       s_fb;
 static sgfx_present_t  s_pr;
 static bool            s_fb_ok = false;
 
+/* CSI display state — file scope so ui_csi_reset() can clear them */
+static uint8_t  s_wf[CSI_HIST_LEN][CSI_N_SUB];   /* waterfall ring buffer       */
+static float    s_motion_hist[CSI_HIST_LEN];
+static int      s_wf_head = 0;                     /* next write slot in s_wf     */
+static uint32_t s_wf_n    = 0;                     /* valid rows, capped at HIST  */
+
+/* FNV-1a over a byte array — tiny, collision-free for small changes */
+static inline uint32_t fnv32(const uint8_t *p, int n) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
 /* ── Framebuffer primitives ──────────────────────────────────────────────── */
 static inline uint16_t pack565(sgfx_rgba8_t c) {
     return (uint16_t)(((c.r & 0xF8u) << 8) | ((c.g & 0xFCu) << 3) | (c.b >> 3));
@@ -445,10 +458,17 @@ void ui_draw_los(void) {
     ui_footbar("R:recal  P:mode  ESC:stop");
 }
 
+/* amplitude (0..255) -> stretched 0..255, clamped */
+static inline uint8_t amp_stretch(uint8_t v, uint8_t lo, uint8_t hi) {
+    if (hi <= lo) return 0;
+    int s = ((int)(v - lo) * 255) / (hi - lo);
+    return (uint8_t)(s < 0 ? 0 : s > 255 ? 255 : s);
+}
+
 /* ── SPECTRUM waterfall ──────────────────────────────────────────────────── */
 void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
                       const uint8_t waterfall[CSI_HIST_LEN][CSI_N_SUB],
-                      int wf_head) {
+                      int wf_head, uint8_t amp_lo, uint8_t amp_hi) {
     ui_statusbar("SPECTRUM");
     fill(0, UI_BAR_H, SGFX_W, UI_MAIN_H, C_BG);
 
@@ -463,7 +483,7 @@ void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
     int bar_off = (SGFX_W - bar_w * CSI_N_SUB) / 2;
 
     for (int i = 0; i < CSI_N_SUB; i++) {
-        int bh = (int)amp[i] * chart_h / 255;
+        int bh = (int)amp_stretch(amp[i], amp_lo, amp_hi) * chart_h / 255;
         int x  = bar_off + i * bar_w;
         fill(x, chart_y, bar_w - 1, chart_h, C_DIM);
         if (bh > 0)
@@ -477,7 +497,6 @@ void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
         int dc_x = bar_off + 23 * bar_w;
         int dc_w = 10 * bar_w;
         fill(dc_x, chart_y, dc_w, chart_h, (sgfx_rgba8_t){ 2,14, 5,255});
-        /* "DC" label centred over the gap */
         int lx = dc_x + dc_w / 2 - 6;
         text1(lx, chart_y + (chart_h - 7) / 2, "DC", (sgfx_rgba8_t){16,80,28,255});
     }
@@ -488,7 +507,7 @@ void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
         int ri = ((wf_head - 1 - row) + CSI_HIST_LEN) % CSI_HIST_LEN;
         int dy = wf_y + row;
         for (int i = 0; i < CSI_N_SUB; i++) {
-            uint16_t pix = pack565(heat(waterfall[ri][i]));
+            uint16_t pix = pack565(heat(amp_stretch(waterfall[ri][i], amp_lo, amp_hi)));
             int x = bar_off + i * bar_w;
             fb_raw_hspan(x, dy, bar_w - 1, pix);
         }
@@ -496,8 +515,8 @@ void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
     if (rows_to_draw > 0)
         sgfx_fb_mark_dirty_px(&s_fb, bar_off, wf_y, bar_w * CSI_N_SUB, rows_to_draw);
 
-    ui_footbar(g_app.active_mode ? "C/UP/DN:ch  P:passive  ESC:menu"
-                                 : "C/UP/DN:ch  P:active   ESC:menu");
+    ui_footbar(g_app.active_mode ? "C/UP/DN:ch  R:reset  P:passive  ESC:menu"
+                                 : "C/UP/DN:ch  R:reset  P:active   ESC:menu");
 }
 
 /* ── VARIANCE bars ───────────────────────────────────────────────────────── */
@@ -505,14 +524,20 @@ void ui_draw_variance(const float var[CSI_N_SUB], const float mean_[CSI_N_SUB]) 
     ui_statusbar("VARIANCE");
     fill(0, UI_BAR_H, SGFX_W, UI_MAIN_H, C_BG);
 
-    float maxv = 1.0f;
+    float maxv = 0.0f;
     for (int i = 0; i < CSI_N_SUB; i++)
         if (var[i] > maxv) maxv = var[i];
 
-    /* Header */
-    text1(4, UI_BAR_H + 2, "per-subcarrier variance", C_LABEL);
+    float max_mean = 1.0f;
+    for (int i = 0; i < CSI_N_SUB; i++)
+        if (mean_[i] > max_mean) max_mean = mean_[i];
+
+    /* Header — show max variance so user can see data is arriving */
+    text1(4, UI_BAR_H + 2, "var", C_LABEL);
     {
-        char mvb[20]; snprintf(mvb, sizeof mvb, "max:%.1f", (double)maxv);
+        char mvb[24];
+        if (maxv > 0.f) snprintf(mvb, sizeof mvb, "max:%.1f", (double)maxv);
+        else            snprintf(mvb, sizeof mvb, "stable");
         text1(SGFX_W - 2 - (int)strlen(mvb) * 6, UI_BAR_H + 2, mvb, C_LABEL);
     }
 
@@ -522,19 +547,27 @@ void ui_draw_variance(const float var[CSI_N_SUB], const float mean_[CSI_N_SUB]) 
     int bar_off = (SGFX_W - bar_w * CSI_N_SUB) / 2;
 
     for (int i = 0; i < CSI_N_SUB; i++) {
-        int bh = (int)((float)ah * var[i] / maxv);
-        int x  = bar_off + i * bar_w;
+        int x = bar_off + i * bar_w;
         fill(x, ay, bar_w - 1, ah, C_DIM);
-        if (bh > 0) {
-            float t = var[i] / maxv;
-            /* medium green (26,170,51) -> yellow-green (204,255,68) */
-            sgfx_rgba8_t bc = {
-                (uint8_t)( 26 + (uint8_t)(178 * t)),
-                (uint8_t)(170 + (uint8_t)( 85 * t)),
-                (uint8_t)( 51 + (uint8_t)( 17 * t)),
-                255
-            };
-            fill(x, ay + ah - bh, bar_w - 1, bh, bc);
+
+        /* Mean amplitude profile — always drawn as dim reference */
+        int mh = (int)((float)ah * mean_[i] / max_mean);
+        if (mh > 0)
+            fill(x, ay + ah - mh, bar_w - 1, mh, C_BAR_LO);
+
+        /* Variance overlay — bright, drawn over mean when non-zero */
+        if (maxv > 0.f) {
+            int bh = (int)((float)ah * var[i] / maxv);
+            if (bh > 0) {
+                float t = var[i] / maxv;
+                sgfx_rgba8_t bc = {
+                    (uint8_t)( 26 + (uint8_t)(178.f * t)),
+                    (uint8_t)(170 + (uint8_t)( 85.f * t)),
+                    (uint8_t)( 51 + (uint8_t)( 17.f * t)),
+                    255
+                };
+                fill(x, ay + ah - bh, bar_w - 1, bh, bc);
+            }
         }
     }
 
@@ -1140,32 +1173,46 @@ void ui_draw_fileman(void) {
 }
 
 /* ── Dispatch ────────────────────────────────────────────────────────────── */
+static float s_raw_motion = 0.f;   /* uncalibrated frame-to-frame delta, 0..100 */
+
+void ui_csi_reset(void) {
+    memset(s_wf,          0, sizeof s_wf);
+    memset(s_motion_hist, 0, sizeof s_motion_hist);
+    s_wf_head    = 0;
+    s_wf_n       = 0;
+    s_raw_motion = 0.f;
+}
+
 void ui_render(const csi_frame_t *latest, const float *amp_hist_flat, bool new_frame) {
     if (!s_dev) return;
-
-    static uint8_t  s_wf[CSI_HIST_LEN][CSI_N_SUB];
-    static float    s_motion_hist[CSI_HIST_LEN];
-    static int      s_wf_head = 0;
-    static float    s_var[CSI_N_SUB];
-    static float    s_var_mean[CSI_N_SUB];
-    static uint32_t s_var_n = 0;
 
     /* Only advance data-dependent state when a genuinely new frame arrived */
     if (new_frame && latest) {
         for (int i = 0; i < CSI_N_SUB; i++)
             s_wf[s_wf_head][i] = latest->amp[i];
         s_wf_head = (s_wf_head + 1) % CSI_HIST_LEN;
+        if (s_wf_n < (uint32_t)CSI_HIST_LEN) s_wf_n++;
 
-        memmove(&s_motion_hist[1], s_motion_hist, (CSI_HIST_LEN-1)*sizeof(float));
-        s_motion_hist[0] = g_app.motion_score;
-
-        s_var_n++;
-        for (int i = 0; i < CSI_N_SUB; i++) {
-            float x = (float)latest->amp[i];
-            float d = x - s_var_mean[i];
-            s_var_mean[i] += d / (float)s_var_n;
-            s_var[i]      += d * (x - s_var_mean[i]);
+        /* Raw uncalibrated motion: mean |amp[t] - amp[t-1]| per subcarrier.
+         * Used in MOTION mode when LOS calibration hasn't run yet.
+         * Scale factor ~3: mean diff of ~10 amp units → score ~30/100. */
+        if (s_wf_n >= 2) {
+            int curr = ((s_wf_head - 1) + CSI_HIST_LEN) % CSI_HIST_LEN;
+            int prev = ((s_wf_head - 2) + CSI_HIST_LEN) % CSI_HIST_LEN;
+            float d = 0.f;
+            for (int i = 0; i < CSI_N_SUB; i++)
+                d += fabsf((float)s_wf[curr][i] - (float)s_wf[prev][i]);
+            d /= (float)CSI_N_SUB;
+            s_raw_motion = 0.15f * (d * 3.f) + 0.85f * s_raw_motion;
+            if (s_raw_motion > 100.f) s_raw_motion = 100.f;
         }
+
+        /* Motion history uses LOS-calibrated score when available, raw otherwise */
+        float hist_val = (g_app.los_state == LOS_SCANNING)
+                         ? g_app.motion_score
+                         : s_raw_motion;
+        memmove(&s_motion_hist[1], s_motion_hist, (CSI_HIST_LEN-1)*sizeof(float));
+        s_motion_hist[0] = hist_val;
     }
 
     switch (g_app.mode) {
@@ -1174,22 +1221,138 @@ void ui_render(const csi_frame_t *latest, const float *amp_hist_flat, bool new_f
     case APP_MODE_LOS:
         ui_draw_los();
         break;
-    case APP_MODE_SPECTRUM:
-        if (latest) ui_draw_spectrum(latest->amp, s_wf, s_wf_head);
-        break;
-    case APP_MODE_VARIANCE: {
-        float samplevar[CSI_N_SUB];
-        for (int i = 0; i < CSI_N_SUB; i++)
-            samplevar[i] = (s_var_n > 1) ? s_var[i] / (float)(s_var_n-1) : 0.f;
-        ui_draw_variance(samplevar, s_var_mean);
+    case APP_MODE_SPECTRUM: {
+        /* Use zero amp when waiting for first frame — renders empty chrome
+         * instead of staying frozen on the previous screen. */
+        static const uint8_t kZeroAmp[CSI_N_SUB] = {};
+        const uint8_t *amp = latest ? latest->amp : kZeroAmp;
+
+        /* Auto-gain: scan waterfall buffer + current amp for actual range */
+        uint8_t lo = 255, hi = 0;
+        int rows = (int)(s_wf_n < (uint32_t)CSI_HIST_LEN ? s_wf_n : CSI_HIST_LEN);
+        for (int r = 0; r < rows; r++) {
+            int ri = ((s_wf_head - 1 - r) + CSI_HIST_LEN) % CSI_HIST_LEN;
+            for (int i = 0; i < CSI_N_SUB; i++) {
+                if (s_wf[ri][i] < lo) lo = s_wf[ri][i];
+                if (s_wf[ri][i] > hi) hi = s_wf[ri][i];
+            }
+        }
+        for (int i = 0; i < CSI_N_SUB; i++) {
+            if (amp[i] < lo) lo = amp[i];
+            if (amp[i] > hi) hi = amp[i];
+        }
+        /* No data yet or flat signal: use a dim narrow range so the view is visibly empty */
+        if (lo >= hi) { lo = 0; hi = 20; }
+        else if ((int)hi - (int)lo < 20) {
+            int mid = (int)lo + ((int)hi - (int)lo) / 2;
+            lo = (uint8_t)(mid > 10  ? mid - 10 : 0);
+            hi = (uint8_t)(mid < 245 ? mid + 10 : 255);
+        }
+
+        /* Throttled debug: spectrum auto-gain state every 5 s */
+        if (g_csi_verbosity >= LOG_LEVEL_DBG) {
+            static uint32_t s_spec_dbg_t = 0;
+            uint32_t now = millis();
+            if (now - s_spec_dbg_t >= 5000u) {
+                s_spec_dbg_t = now;
+                LOG_D("spec wf_n=%lu gain_range=[%u..%u] cur=[%u..%u]",
+                      (unsigned long)s_wf_n, lo, hi,
+                      amp[0], amp[CSI_N_SUB-1]);
+            }
+        }
+        /* Hash of current amp[] — logs every 2 s; SAME=stall, changed=live */
+        if (g_csi_verbosity >= LOG_LEVEL_DBG) {
+            static uint32_t s_spec_hash_t = 0, s_spec_hash_prev = 0;
+            uint32_t now = millis();
+            if (now - s_spec_hash_t >= 2000u) {
+                s_spec_hash_t = now;
+                uint32_t h = fnv32(amp, CSI_N_SUB);
+                LOG_D("spec amp_hash=%08lx %s",
+                      (unsigned long)h,
+                      h == s_spec_hash_prev ? "SAME(stall?)" : "changed");
+                s_spec_hash_prev = h;
+            }
+        }
+
+        ui_draw_spectrum(amp, s_wf, s_wf_head, lo, hi);
         break;
     }
-    case APP_MODE_MOTION:
-        ui_draw_motion(g_app.motion_score, s_motion_hist);
+    case APP_MODE_VARIANCE: {
+        /* Windowed variance over the last s_wf_n frames — no lifetime accumulation */
+        int n = (int)(s_wf_n < (uint32_t)CSI_HIST_LEN ? s_wf_n : CSI_HIST_LEN);
+        float wmean[CSI_N_SUB] = {};
+        float wvar[CSI_N_SUB]  = {};
+        if (n > 1) {
+            for (int f = 0; f < n; f++) {
+                int ri = ((s_wf_head - 1 - f) + CSI_HIST_LEN) % CSI_HIST_LEN;
+                for (int i = 0; i < CSI_N_SUB; i++)
+                    wmean[i] += (float)s_wf[ri][i];
+            }
+            for (int i = 0; i < CSI_N_SUB; i++)
+                wmean[i] /= (float)n;
+            for (int f = 0; f < n; f++) {
+                int ri = ((s_wf_head - 1 - f) + CSI_HIST_LEN) % CSI_HIST_LEN;
+                for (int i = 0; i < CSI_N_SUB; i++) {
+                    float d = (float)s_wf[ri][i] - wmean[i];
+                    wvar[i] += d * d;
+                }
+            }
+            for (int i = 0; i < CSI_N_SUB; i++)
+                wvar[i] /= (float)(n - 1);
+        }
+
+        /* Throttled debug: variance window state every 5 s */
+        if (g_csi_verbosity >= LOG_LEVEL_DBG) {
+            static uint32_t s_var_dbg_t = 0;
+            uint32_t now = millis();
+            if (now - s_var_dbg_t >= 5000u) {
+                s_var_dbg_t = now;
+                float maxv = 0.f;
+                int   maxi = 0, nnonzero = 0;
+                for (int i = 0; i < CSI_N_SUB; i++) {
+                    if (wvar[i] > maxv) { maxv = wvar[i]; maxi = i; }
+                    if (wvar[i] > 0.f) nnonzero++;
+                }
+                LOG_D("var n=%d maxv=%.2f@sub%d nonzero=%d/56 mean[0]=%.1f mean[28]=%.1f",
+                      n, (double)maxv, maxi, nnonzero,
+                      (double)wmean[0], (double)wmean[28]);
+            }
+        }
+        /* Hash of the latest raw ring-buffer row — proves whether new frames arrive */
+        if (g_csi_verbosity >= LOG_LEVEL_DBG) {
+            static uint32_t s_var_hash_t = 0, s_var_hash_prev = 0;
+            uint32_t now = millis();
+            if (now - s_var_hash_t >= 2000u) {
+                s_var_hash_t = now;
+                uint32_t h = 0;
+                if (s_wf_n > 0) {
+                    int ri = ((s_wf_head - 1) + CSI_HIST_LEN) % CSI_HIST_LEN;
+                    h = fnv32(s_wf[ri], CSI_N_SUB);
+                }
+                LOG_D("var row_hash=%08lx %s wf_n=%lu",
+                      (unsigned long)h,
+                      h == s_var_hash_prev ? "SAME(stall?)" : "changed",
+                      (unsigned long)s_wf_n);
+                s_var_hash_prev = h;
+            }
+        }
+
+        ui_draw_variance(wvar, wmean);
         break;
-    case APP_MODE_CORR:
-        if (latest) ui_draw_corr(latest->amp);
+    }
+    case APP_MODE_MOTION: {
+        /* Use LOS-calibrated score when scanning, raw delta score otherwise */
+        float motion_score = (g_app.los_state == LOS_SCANNING)
+                             ? g_app.motion_score
+                             : s_raw_motion;
+        ui_draw_motion(motion_score, s_motion_hist);
         break;
+    }
+    case APP_MODE_CORR: {
+        static const uint8_t kZeroAmp[CSI_N_SUB] = {};
+        ui_draw_corr(latest ? latest->amp : kZeroAmp);
+        break;
+    }
     case APP_MODE_TRAINING:
         ui_draw_training();
         break;

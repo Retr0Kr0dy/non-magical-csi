@@ -119,7 +119,7 @@ static inline void inject_apply_sa(uint8_t *frame, uint32_t n) {
 
 static void active_probe_task(void *) {
     uint32_t log_t   = millis();
-    uint32_t log_rx0 = s_frame_total;   /* CSI frame count at last log tick */
+    uint32_t log_rx0 = s_frame_total;
     while (s_active_run) {
         uint32_t n = s_active_tx_ok;
         inject_apply_sa(s_probe_frame, n);
@@ -134,12 +134,17 @@ static void active_probe_task(void *) {
             uint32_t rx_rate = (rx_now - log_rx0) * 1000 / (now - log_t);
             log_rx0 = rx_now;
             log_t   = now;
-            Serial.printf("[CSI] inject tx_ok=%lu tx_err=%lu csi_fps=%lu\n",
-                          (unsigned long)s_active_tx_ok,
-                          (unsigned long)s_active_tx_err,
-                          (unsigned long)rx_rate);
+            LOG_I("inject tx_ok=%lu tx_err=%lu csi_fps=%lu",
+                  (unsigned long)s_active_tx_ok,
+                  (unsigned long)s_active_tx_err,
+                  (unsigned long)rx_rate);
         }
-        vTaskDelay(pdMS_TO_TICKS(CSI_ACTIVE_INTERVAL_MS));
+        /* Sleep in 10 ms chunks so active_stop() sees the flag within ~10 ms.
+         * A single vTaskDelay(INTERVAL_MS) would outlast active_stop()'s timeout
+         * if the call arrived just after the delay started, leaving a ghost task. */
+        uint32_t wake = millis() + CSI_ACTIVE_INTERVAL_MS;
+        while (s_active_run && (int32_t)(wake - millis()) > 0)
+            vTaskDelay(pdMS_TO_TICKS(10));
     }
     s_active_task = nullptr;
     vTaskDelete(nullptr);
@@ -166,7 +171,7 @@ static void active_start(const uint8_t *bssid) {
     s_active_run = true;
     BaseType_t ok = xTaskCreatePinnedToCore(active_probe_task, "csi_active", 2048,
                                             nullptr, 2, &s_active_task, 0);
-    Serial.printf("[CSI] active_start bssid=%02x:%02x:%02x:%02x:%02x:%02x task=%s\n",
+    LOG_I("active_start bssid=%02x:%02x:%02x:%02x:%02x:%02x task=%s",
                   bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5],
                   ok == pdPASS ? "OK" : "FAIL");
 }
@@ -174,11 +179,13 @@ static void active_start(const uint8_t *bssid) {
 static void active_stop(void) {
     if (!s_active_run) return;
     s_active_run = false;
-    /* task sees flag within INTERVAL_MS, self-deletes, and clears s_active_task */
+    /* Task sleeps in 10 ms chunks and checks the flag each chunk, so it exits
+     * within ~10 ms.  Wait 3× INTERVAL_MS as a generous upper bound before the
+     * safety clear — avoids ghost tasks accumulating across re-entries. */
     uint32_t t0 = millis();
-    while (s_active_task && (millis() - t0) < 100)
+    while (s_active_task && (millis() - t0) < CSI_ACTIVE_INTERVAL_MS * 3)
         vTaskDelay(pdMS_TO_TICKS(5));
-    s_active_task = nullptr;   /* safety clear */
+    s_active_task = nullptr;
 }
 
 /* Alpha-max beta-min: |sqrt(I²+Q²)| ≈ α·max + β·min, error < 4%.
@@ -230,20 +237,25 @@ static void csi_cb(void* ctx, wifi_csi_info_t* d) {
 }
 
 static void wifi_sta_start(int channel) {
-    esp_wifi_stop();
-    esp_wifi_deinit();
+    LOG_I("wifi_sta_start ch=%d", channel);
 
-    /* Default event loop — suppresses "failed to post WiFi event" log spam */
-    esp_event_loop_create_default();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    esp_wifi_set_storage(WIFI_STORAGE_RAM);
-
-    /* APSTA: STA stays in promiscuous for CSI; AP interface used for probe injection.
-     * In APSTA the driver forces AP to follow the STA channel, so csi_set_channel()
-     * keeps both interfaces on the target AP's channel automatically.             */
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    /* Init once — repeated deinit/reinit corrupts LwIP/event-handler state
+     * and causes the CSI callback to stop firing after 2-3 re-entries.
+     * On subsequent calls we only stop→reconfigure→start. */
+    static bool s_wifi_inited = false;
+    if (!s_wifi_inited) {
+        esp_event_loop_create_default();
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        esp_err_t r;
+        if ((r = esp_wifi_init(&cfg)) != ESP_OK)
+            LOG_E("esp_wifi_init failed: %d", r);
+        esp_wifi_set_storage(WIFI_STORAGE_RAM);
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+        s_wifi_inited = true;
+        LOG_I("wifi_init done");
+    } else {
+        esp_wifi_stop();   /* stop before reconfiguring */
+    }
 
     /* Minimal hidden soft-AP — required for WIFI_IF_AP TX; not used for connections */
     wifi_config_t ap_cfg = {};
@@ -253,27 +265,35 @@ static void wifi_sta_start(int channel) {
     ap_cfg.ap.authmode        = WIFI_AUTH_OPEN;
     ap_cfg.ap.ssid_hidden     = 1;
     ap_cfg.ap.max_connection  = 0;
-    ap_cfg.ap.beacon_interval = 60000;  /* max — one beacon per minute, minimal noise */
+    ap_cfg.ap.beacon_interval = 60000;
     esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
 
-    esp_wifi_start();
+    esp_err_t r;
+    if ((r = esp_wifi_start()) != ESP_OK)
+        LOG_E("esp_wifi_start failed: %d", r);
     esp_wifi_set_ps(WIFI_PS_NONE);
-    esp_wifi_set_channel((uint8_t)channel, WIFI_SECOND_CHAN_NONE);
+    if ((r = esp_wifi_set_channel((uint8_t)channel, WIFI_SECOND_CHAN_NONE)) != ESP_OK)
+        LOG_E("esp_wifi_set_channel %d failed: %d", channel, r);
 }
 
 static void csi_enable(void) {
     wifi_csi_config_t c = {};
     c.lltf_en           = true;
-    c.htltf_en          = false;   /* LLTF only: lower latency, 128 bytes/frame */
+    c.htltf_en          = false;
     c.stbc_htltf2_en    = false;
-    c.ltf_merge_en      = true;    /* merge LTF estimates across sub-frames  */
-    c.channel_filter_en = true;    /* HW IIR — accepts more frame types, higher fps */
+    c.ltf_merge_en      = false;   /* per-frame independent estimate — needed for sensing */
+    c.channel_filter_en = false;   /* raw per-frame LLTF: variance non-zero even when static */
     c.manu_scale        = false;
     c.shift             = 0;
-    esp_wifi_set_csi_config(&c);
+    esp_err_t r;
+    if ((r = esp_wifi_set_csi_config(&c)) != ESP_OK)
+        LOG_E("esp_wifi_set_csi_config failed: %d", r);
     esp_wifi_set_csi_rx_cb(csi_cb, nullptr);
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_csi(true);
+    if ((r = esp_wifi_set_promiscuous(true)) != ESP_OK)
+        LOG_E("set_promiscuous failed: %d", r);
+    if ((r = esp_wifi_set_csi(true)) != ESP_OK)
+        LOG_E("esp_wifi_set_csi failed: %d", r);
+    LOG_I("CSI enabled");
 }
 
 int csi_init(int channel) {
@@ -293,14 +313,20 @@ int csi_init(int channel) {
 }
 
 void csi_deinit(void) {
+    LOG_I("CSI deinit");
     active_stop();
     esp_wifi_set_csi(false);
     esp_wifi_set_promiscuous(false);
+    esp_wifi_stop();   /* leave stack inited but stopped; wifi_sta_start restarts it */
     g_app.csi_running = false;
 }
 
 void csi_set_channel(int ch) {
-    esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE);
+    esp_err_t r = esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE);
+    if (r != ESP_OK)
+        LOG_E("set_channel %d failed: %d", ch, r);
+    else
+        LOG_I("channel → %d", ch);
     g_app.wifi_channel = ch;
 }
 
@@ -396,6 +422,10 @@ uint32_t       csi_active_tx_ok(void)  { return s_active_tx_ok; }
 uint32_t       csi_active_tx_err(void) { return s_active_tx_err; }
 
 void csi_active_start(void) {
+    if (!g_app.csi_running) {
+        LOG_I("active_start deferred — WiFi not up");
+        return;
+    }
     static const uint8_t kBcast[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
     active_start(s_filter ? s_target : kBcast);
 }

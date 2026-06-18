@@ -80,3 +80,22 @@ typedef struct {
 } app_state_t;
 
 extern app_state_t g_app;
+
+/* ── Logging ──────────────────────────────────────────────────────────────── */
+#define LOG_LEVEL_OFF  0   /* silent                                           */
+#define LOG_LEVEL_ERR  1   /* errors only                                      */
+#define LOG_LEVEL_INFO 2   /* lifecycle: start/stop/channel/first-frame        */
+#define LOG_LEVEL_DBG  3   /* per-view data dumps (throttled)                  */
+
+extern int g_csi_verbosity;    /* default LOG_LEVEL_INFO, changed via `log` cmd   */
+
+#ifdef ARDUINO
+#include <Arduino.h>
+#define LOG_E(fmt, ...) do { if (g_csi_verbosity >= LOG_LEVEL_ERR)  Serial.printf("[E] " fmt "\r\n", ##__VA_ARGS__); } while(0)
+#define LOG_I(fmt, ...) do { if (g_csi_verbosity >= LOG_LEVEL_INFO) Serial.printf("[I] " fmt "\r\n", ##__VA_ARGS__); } while(0)
+#define LOG_D(fmt, ...) do { if (g_csi_verbosity >= LOG_LEVEL_DBG)  Serial.printf("[D] " fmt "\r\n", ##__VA_ARGS__); } while(0)
+#else
+#define LOG_E(fmt, ...) do {} while(0)
+#define LOG_I(fmt, ...) do {} while(0)
+#define LOG_D(fmt, ...) do {} while(0)
+#endif

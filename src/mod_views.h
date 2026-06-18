@@ -9,6 +9,11 @@ extern "C" {
 /* Call once after display init */
 void ui_init(sgfx_device_t *dev);
 
+/* Reset accumulated CSI display state (waterfall history, variance accumulators).
+ * Call after csi_init() so stale data from a previous session doesn't pollute
+ * the variance and spectrum views. */
+void ui_csi_reset(void);
+
 /* Flush dirty framebuffer tiles to the display — call once per frame */
 void ui_present(void);
 
@@ -24,7 +29,7 @@ void ui_draw_menu(int sel);
 void ui_draw_los(void);
 void ui_draw_spectrum(const uint8_t amp[CSI_N_SUB],
                       const uint8_t waterfall[CSI_HIST_LEN][CSI_N_SUB],
-                      int wf_row);
+                      int wf_row, uint8_t amp_lo, uint8_t amp_hi);
 void ui_draw_variance(const float var[CSI_N_SUB], const float mean[CSI_N_SUB]);
 void ui_draw_motion(float score, const float hist[CSI_HIST_LEN]);
 void ui_draw_corr(const uint8_t amp[CSI_N_SUB]);

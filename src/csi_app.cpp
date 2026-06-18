@@ -18,7 +18,7 @@
  * ───────────────
  *   sys                      — firmware + chip info
  *   hw                       — SIC driver list
- *   csi start [ch]           — start CSI on channel (default 6)
+ *   csi start [ch]           — start CSI on channel (default 1)
  *   csi stop                 — stop
  *   csi info                 — frame count, FPS, per-sub mean/var
  *   csi scan                 — scan APs (brief pause)
@@ -56,7 +56,8 @@ extern "C" {
 #include "mod_views.h"
 
 /* ── Global app state ───────────────────────────────────────────────────── */
-app_state_t g_app = {};
+app_state_t g_app      = {};
+int         g_csi_verbosity = LOG_LEVEL_ERR;   /* use `log 2` or `log 3` for more */
 
 /* ── Forward declarations ───────────────────────────────────────────────── */
 static void menu_up(void);
@@ -347,6 +348,9 @@ static const struct konsole_io s_io = {
  * so apply_active_mode() only acts on the other sensing modes. */
 static void apply_active_mode(void) {
     switch (g_app.mode) {
+    case APP_MODE_LOS:      /* LOS also benefits from active injection for faster cal */
+    case APP_MODE_MOTION:
+    case APP_MODE_CORR:
     case APP_MODE_SPECTRUM:
     case APP_MODE_VARIANCE:
     case APP_MODE_TRAINING:
@@ -450,6 +454,13 @@ static void app_handle_char(char c) {
         if (c == 'q' || c == 'Q') { csi_active_stop(); los_stop(); g_app.mode = APP_MODE_MENU; }
     }
 
+    /* R = reset windowed stats in spectrum/variance */
+    if ((c == 'r' || c == 'R')
+        && (g_app.mode == APP_MODE_SPECTRUM || g_app.mode == APP_MODE_VARIANCE)) {
+        ui_csi_reset();
+        return;
+    }
+
     /* Channel cycling — available in all modes */
     if (c == 'c' || c == 'C') csi_set_channel(g_app.wifi_channel < 13 ? g_app.wifi_channel + 1 : 1);
     if (c == '+' || c == '=') csi_set_channel(g_app.wifi_channel < 13 ? g_app.wifi_channel + 1 : 1);
@@ -516,7 +527,7 @@ static int cmd_csi(struct konsole *ks, int argc, char **argv) {
         return 0;
     }
     if (!strcmp(argv[1], "start")) {
-        int ch = (argc >= 3) ? atoi(argv[2]) : (g_app.wifi_channel ? g_app.wifi_channel : 6);
+        int ch = (argc >= 3) ? atoi(argv[2]) : (g_app.wifi_channel ? g_app.wifi_channel : 1);
         if (ch < 1 || ch > 13) { kon_printf(ks, "channel must be 1-13\r\n"); return -1; }
         if (g_app.csi_running) csi_deinit();
         csi_init(ch);
@@ -634,13 +645,33 @@ static int cmd_beep(struct konsole *ks, int argc, char **argv) {
     return rc >= 0 ? 0 : -1;
 }
 
+static int cmd_log(struct konsole *ks, int argc, char **argv) {
+    if (argc < 2) {
+        kon_printf(ks, "log level: %d  (0=off 1=err 2=info 3=dbg)\r\n", g_csi_verbosity);
+        return 0;
+    }
+    /* Reject non-numeric args — atoi("set") silently returns 0 */
+    const char *arg = argv[1];
+    if (arg[0] < '0' || arg[0] > '9') {
+        kon_printf(ks, "usage: log 0..3\r\n"); return -1;
+    }
+    int lvl = atoi(arg);
+    if (lvl < LOG_LEVEL_OFF || lvl > LOG_LEVEL_DBG) {
+        kon_printf(ks, "usage: log 0..3\r\n"); return -1;
+    }
+    g_csi_verbosity = lvl;
+    kon_printf(ks, "log level → %d\r\n", g_csi_verbosity);
+    return 0;
+}
+
 static const struct kon_cmd g_cmds[] = {
-    { "sys",  "firmware + chip info",           cmd_sys  },
-    { "hw",   "list detected SIC hardware",     cmd_hw   },
-    { "csi",  "csi start|stop|info|scan|ch|ap", cmd_csi  },
-    { "mode", "mode [los|spec|var|motion|corr]", cmd_mode },
-    { "los",  "los start|stop|recal",           cmd_los  },
-    { "beep", "beep [hz] [ms]",                 cmd_beep },
+    { "sys",  "firmware + chip info",             cmd_sys  },
+    { "hw",   "list detected SIC hardware",       cmd_hw   },
+    { "csi",  "csi start|stop|info|scan|ch|ap",   cmd_csi  },
+    { "mode", "mode [los|spec|var|motion|corr]",  cmd_mode },
+    { "los",  "los start|stop|recal",             cmd_los  },
+    { "beep", "beep [hz] [ms]",                   cmd_beep },
+    { "log",  "log [0-3]  get/set verbosity",     cmd_log  },
 };
 
 /* ── Splash screen ───────────────────────────────────────────────────────── */
@@ -693,22 +724,23 @@ void csi_app_init(void) {
     /* App state — must be zeroed before csi_init writes into it */
     memset(&g_app, 0, sizeof g_app);
     g_app.mode             = APP_MODE_MENU;
-    g_app.wifi_channel     = 6;
+    g_app.wifi_channel     = 1;
     g_app.active_mode = true;
 
     los_init();
     training_init();
     chanoccup_init();
 
-    /* Start CSI collection on channel 6 by default */
-    csi_init(6);
-
-    kon_printf(&g_ks, "[CSI] started ch6  LLTF HT20  56 subcarriers\r\n");
-
     kon_banner(&g_ks, "NON MAGICAL CSI ready  (type 'help' or navigate with keyboard)");
 }
 
 void csi_app_run(void) {
+    /* Frame buffer — declared early so the WiFi stop/start block can reset
+     * s_ever_frame before the frame drain runs later in the same tick. */
+    static csi_frame_t s_frame_buf;
+    static bool        s_ever_frame = false;
+    static bool        s_new_frame  = false;
+
     /* ── Input & math — runs every iteration, never throttled ────────────── */
     neu_kbd_poll();
     process_nav();
@@ -718,28 +750,32 @@ void csi_app_run(void) {
      * Checked after all input handlers so every code path that sets g_app.mode
      * (direct assignments, enter_mode, training self-exit) is covered. */
     {
+        /* APP_MODE__COUNT = sentinel "no previous mode yet".
+         * Treat startup the same as coming from an idle state so the first
+         * navigation to a sensing mode correctly starts WiFi. */
         static app_mode_t s_prev_mode = APP_MODE__COUNT;
         if (g_app.mode != s_prev_mode) {
             bool was_idle = (s_prev_mode == APP_MODE_MENU
                           || s_prev_mode == APP_MODE_FILEMAN
-                          || s_prev_mode == APP_MODE__COUNT);
+                          || s_prev_mode == APP_MODE__COUNT); /* startup sentinel */
             bool is_idle  = (g_app.mode == APP_MODE_MENU
                           || g_app.mode == APP_MODE_FILEMAN);
-            if (!was_idle && is_idle && g_app.csi_running)
+            if (!was_idle && is_idle && g_app.csi_running) {
+                LOG_I("wifi stop (mode→idle)");
                 csi_deinit();
-            if (was_idle && !is_idle && !g_app.csi_running)
+            }
+            if (was_idle && !is_idle && !g_app.csi_running) {
+                LOG_I("wifi start ch=%d (idle→mode %d)", g_app.wifi_channel, (int)g_app.mode);
                 csi_init(g_app.wifi_channel);
+                apply_active_mode(); /* start injection now that WiFi is up */
+                ui_csi_reset();
+                s_ever_frame = false;  /* discard stale pre-stop frame */
+            }
             s_prev_mode = g_app.mode;
         }
     }
 
-    /* Drain all pending CSI frames immediately — LOS/stats update at CSI rate,
-     * not display rate.  s_have_frame is true if at least one frame arrived. */
-    /* s_frame_buf: last received frame, valid once s_ever_frame is true.
-     * s_new_frame: true if at least one frame arrived since last render — cleared after render. */
-    static csi_frame_t s_frame_buf;
-    static bool        s_ever_frame = false;
-    static bool        s_new_frame  = false;
+    /* Drain all pending CSI frames — LOS/stats update at CSI rate, not display rate */
     {
         csi_frame_t frame;
         uint32_t now_ms = millis();
@@ -749,9 +785,27 @@ void csi_app_run(void) {
                 training_on_frame(&frame, now_ms);
             if (g_app.mode == APP_MODE_CHANOCCUP)
                 chanoccup_on_frame(now_ms);
+            if (!s_ever_frame)
+                LOG_I("first frame ch=%d rssi=%d fwi=%d", frame.channel, frame.rssi, frame.fwi);
             s_frame_buf  = frame;
             s_ever_frame = true;
             s_new_frame  = true;
+        }
+    }
+    /* Throttled DBG: log amp range once per 5 s (only while WiFi is running) */
+    if (s_ever_frame && g_app.csi_running && g_csi_verbosity >= LOG_LEVEL_DBG) {
+        static uint32_t s_dbg_t = 0;
+        uint32_t now = millis();
+        if (now - s_dbg_t >= 5000u) {
+            s_dbg_t = now;
+            uint8_t lo = 255, hi = 0;
+            for (int i = 0; i < CSI_N_SUB; i++) {
+                if (s_frame_buf.amp[i] < lo) lo = s_frame_buf.amp[i];
+                if (s_frame_buf.amp[i] > hi) hi = s_frame_buf.amp[i];
+            }
+            LOG_D("frame amp range [%u..%u] rssi=%d ch=%d fps=%lu total=%lu",
+                  lo, hi, s_frame_buf.rssi, s_frame_buf.channel,
+                  (unsigned long)g_app.csi_fps, (unsigned long)g_app.csi_total);
         }
     }
 

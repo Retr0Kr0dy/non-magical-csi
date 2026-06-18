@@ -203,15 +203,15 @@ static void beep_done(void) {
 static void sd_open_guided(void) {
     const sd_t *sd = sic_sd(0);
     if (!sd) return;
-    if (sd->v->begin(sd) != 0) { Serial.println("[train] SD begin failed"); return; }
-    if (!sd->v->present(sd)) { Serial.println("[train] no SD card"); return; }
+    if (sd->v->begin(sd) != 0) { LOG_E("train: SD begin failed"); return; }
+    if (!sd->v->present(sd)) { LOG_E("train: no SD card"); return; }
     if (!SD.exists("/non-magical-csi")) SD.mkdir("/non-magical-csi");
     if (!SD.exists("/non-magical-csi/" BOARD_NAME)) SD.mkdir("/non-magical-csi/" BOARD_NAME);
 
     snprintf(s_filename, sizeof s_filename,
              "/non-magical-csi/" BOARD_NAME "/%s_%s.csv", s_name, kProcs[s_proc].name);
     s_file = SD.open(s_filename, FILE_WRITE);
-    if (!s_file) { Serial.printf("[train] open failed: %s\n", s_filename); return; }
+    if (!s_file) { LOG_E("train: open failed: %s", s_filename); return; }
 
     s_file.print("ts_ms,label,rssi,ch");
     for (int i = 0; i < CSI_N_SUB; i++) {
@@ -219,14 +219,14 @@ static void sd_open_guided(void) {
     }
     s_file.println();
     s_sd_ok = true;
-    Serial.printf("[train] logging -> %s\n", s_filename);
+    LOG_I("train: logging -> %s", s_filename);
 }
 
 static void sd_open_free(void) {
     const sd_t *sd = sic_sd(0);
     if (!sd) return;
-    if (sd->v->begin(sd) != 0) { Serial.println("[train] SD begin failed"); return; }
-    if (!sd->v->present(sd)) { Serial.println("[train] no SD card"); return; }
+    if (sd->v->begin(sd) != 0) { LOG_E("train: SD begin failed"); return; }
+    if (!sd->v->present(sd)) { LOG_E("train: no SD card"); return; }
     if (!SD.exists("/non-magical-csi")) SD.mkdir("/non-magical-csi");
     if (!SD.exists("/non-magical-csi/" BOARD_NAME)) SD.mkdir("/non-magical-csi/" BOARD_NAME);
 
@@ -235,7 +235,7 @@ static void sd_open_free(void) {
              "/non-magical-csi/" BOARD_NAME "/%s_free_%s.csv", s_name, kProcs[s_free_src_proc].name);
     bool write_header = !SD.exists(s_filename);
     s_file = SD.open(s_filename, FILE_APPEND);
-    if (!s_file) { Serial.printf("[train] open failed: %s\n", s_filename); return; }
+    if (!s_file) { LOG_E("train: open failed: %s", s_filename); return; }
 
     if (write_header) {
         s_file.print("ts_ms,label,rssi,ch");
@@ -245,7 +245,7 @@ static void sd_open_free(void) {
         s_file.println();
     }
     s_sd_ok = true;
-    Serial.printf("[train] logging -> %s\n", s_filename);
+    LOG_I("train: logging -> %s", s_filename);
 }
 
 static void sd_write(const csi_frame_t *f, const char *label) {
@@ -282,8 +282,8 @@ static void enter_cap(uint32_t now_ms) {
     const train_step_t *st = cur_step();
     s_deadline = now_ms + (uint32_t)(st ? st->cap_s : 0) * 1000u;
     beep_ascending();
-    if (st) Serial.printf("[train] CAP  label='%s' dur=%ds\n",
-                          st->label ? st->label : "(discard)", st->cap_s);
+    if (st) LOG_I("train: CAP label='%s' dur=%ds",
+                  st->label ? st->label : "(discard)", st->cap_s);
 }
 
 static void enter_buf(uint32_t now_ms) {
@@ -295,8 +295,8 @@ static void enter_buf(uint32_t now_ms) {
         enter_cap(now_ms);
     } else {
         s_deadline = now_ms + (uint32_t)st->buf_s * 1000u;
-        Serial.printf("[train] BUF  step=%d instr='%s' dur=%ds\n",
-                      s_step, st->instr1, st->buf_s);
+        LOG_I("train: BUF step=%d instr='%s' dur=%ds",
+              s_step, st->instr1, st->buf_s);
     }
 }
 
@@ -327,7 +327,7 @@ static void advance_step(uint32_t now_ms) {
     s_step++;
     if (s_step >= steps_total()) {
         beep_done();
-        Serial.printf("[train] capture done - %d frames written\n", s_frames_written);
+        LOG_I("train: capture done - %d frames written", s_frames_written);
         if (is_free_running()) {
             s_ui = TRAIN_UI_FREE_DONE;   /* SD stays open for more captures */
         } else {

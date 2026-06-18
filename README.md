@@ -1,4 +1,4 @@
-# non magical csi - v2.1
+# non magical csi - v2.2
 
 > no magical radar
 
@@ -50,7 +50,7 @@ WiFi is stopped automatically when in the menu or Files view to save power. It r
 **Global keys** (work in all modes):
 - **C** = cycle channel 1->2->...->13->1
 - **+/-** = channel up/down
-- **P** = toggle active / passive injection (not available in Console, Motion, or Corr)
+- **P** = toggle active / passive injection (not available in Console or ChanOcc)
 - **ESC / M** = back to menu
 
 ## LOS detector
@@ -61,9 +61,11 @@ Measures how much frame-to-frame channel differences exceed the calibrated basel
 
 **Calibration** collects a baseline in passive mode (80 frames, ~40-80 s) or active injection mode (100 frames, ~10 s at 10 fps).
 
-**Active injection** is on by default. Press **P** in LOS, Spectrum, Variance, or Training mode to toggle between active and passive. ChanOcc is always passive.
+**Active injection** is on by default. Press **P** in any sensing mode (LOS, Spectrum, Variance, Motion, Corr, Training) to toggle between active and passive. ChanOcc is always passive.
 
 In LOS mode: **F** = scan APs, **P** = toggle active/passive, **R** = recalibrate, **C** = cycle channel, **Q** = quit.
+
+In Spectrum / Variance mode: **R** = reset waterfall history, **C** = cycle channel, **P** = toggle active/passive.
 
 **Audio alerts** - Geiger-counter style: beep rate scales continuously with score. Below 20 = silence.
 
@@ -129,7 +131,7 @@ ts_ms,label,rssi,ch,a00,a01,...,a55
 - **Session naming** - name sessions meaningfully. There is no RTC on the ESP32; timestamps are milliseconds since boot and are useless across sessions.
 - **Check ChanOcc first** - use the channel occupation view to confirm your AP is active and delivering consistent fps on the chosen channel before starting a training session.
 
-## file manager (v2.1)
+## file manager
 
 Browse and delete files on the SD card without removing it from the device. Access via key 9 from the menu.
 
@@ -168,7 +170,7 @@ Output binary: `bin/non-magical-csi-<version>-<env>.bin` (factory merged, flash 
 ## serial commands
 
 ```
-csi start [ch]          start CSI on channel (default 6)
+csi start [ch]          start CSI on channel (default 1)
 csi stop                stop
 csi scan                scan for nearby APs
 csi ap <idx>            lock onto scanned AP (sets BSSID filter)
@@ -179,6 +181,9 @@ csi info                frame count, fps, per-subcarrier stats
 los start               begin LOS sequence (countdown -> calibrate -> scan)
 los stop                stop
 los recal               recalibrate baseline
+mode [los|spec|var|motion|corr|console]  switch view from terminal
+log [0-3]               get/set log verbosity (0=off 1=err 2=info 3=dbg)
+beep [hz] [ms]          test speaker
 ```
 
 ## references
